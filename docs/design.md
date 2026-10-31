@@ -102,7 +102,7 @@ MCP 工具和 CLI 子命令一一对应。CLI 供不支持 MCP、但能执行命
 | `link.at` | 视频 ID + 秒数 → 跳转链接 | 卡片里只能出现由工具生成的链接 |
 | `digest.record` / `digest.list` | 本次推荐的视频与片段 → 成功；或查询最近的推荐 | 记录后，`feeds.check` 不再返回这些视频；用户问“昨天推了什么”时可查 |
 | `feedback.add` | 视频 ID + `interested` / `not_interested` / `watched` / `correct` + 可选说明 → 成功 | 只记录明确反馈 |
-| `profile.get` / `set` | — | 长期兴趣、当前问题（带到期日）、推送时间与时区、每次最多几条、观看预算、无新内容时是否告知 |
+| `profile.get` / `set` | — | 长期兴趣、当前问题（带到期日）、推送时间与时区、每次最多几条、观看预算、无新内容时是否告知；字幕设置（`yt-dlp` 路径、`cookies_from_browser`，默认不开启） |
 
 检索选型：第一版使用词法检索，由宿主模型改写查询，不引入向量模型，避免新增模型调用和 Key。实测跨语言召回不足时，再评估嵌入方案。
 
@@ -126,7 +126,17 @@ MCP 工具和 CLI 子命令一一对应。CLI 供不支持 MCP、但能执行命
 - ASR（后续）：精度取决于 ASR 是否返回句级时间。现有 VidSnap ASR（`qwen-audio-3.1-asr-flash`）每个请求只返回整段文本，切片长度为 240 秒（见 `src/vidsnap/video/audio.py` 的 `ASR_SEGMENT_SECONDS`），所以只能定位到约 4 分钟的窗口。要精确到句，需要换用能返回句级时间戳的 ASR 模式，留待实测后决定。
 - 跳转链接一律从片段开头前 5 秒开始播放，保留一点上下文。
 
-YouTube 的风险：字幕接口和视频下载都可能被反爬拦截。2026-11-01 实测（见[兼容性记录](../../personal-video-guide-compatibility.md)）：从本机代理出口发出的不带 cookie 的字幕请求，10 次全部被拒；使用用户已登录浏览器的 cookie 后，`yt-dlp` 能取到全片自动字幕。自动字幕要选 `en-orig` 原始轨，`en` 轨是机器翻译。字幕的具体获取方式（调用用户安装的 `yt-dlp`，或自行请求）待用户决定，见实施计划 Task 4。
+YouTube 的风险：字幕接口和视频下载都可能被反爬拦截。2026-11-01 实测（见[兼容性记录](host-compatibility.md)）：从本机代理出口发出的不带 cookie 的字幕请求，10 次全部被拒；使用用户已登录浏览器的 cookie 后，`yt-dlp` 能取到全片自动字幕。自动字幕要选 `en-orig` 原始轨，`en` 轨是机器翻译。
+
+YouTube 字幕的获取方式已定为方案 A（2026-11-01 用户决定）：调用用户自己安装的 `yt-dlp`，只取字幕。
+
+- 工具包不安装、不打包、不锁定 `yt-dlp` 版本。从 `PATH` 或 profile 里配置的路径查找；找不到时返回 `ytdlp_missing`，并提示用户自行安装。
+- 只用固定的参数白名单：`--skip-download`、`--write-subs`、`--write-auto-subs`、`--sub-langs`、`--sub-format json3/vtt`、`-o` 指向临时目录、`--no-playlist`；不传任何会下载音视频的参数。
+- cookie 默认关闭。只有用户在 profile 里填写了 `cookies_from_browser`（例如 `chrome`）时，才追加 `--cookies-from-browser <browser>`。工具包从不读取、复制或保存 cookie 内容。
+- 每次调用有超时；输出写进临时目录，解析完即删除。错误按原因归类为 `bot_check`、`no_cookies`、`no_captions`、`ytdlp_missing`、`timeout`，不把 `yt-dlp` 的原始输出写进日志或返回值。
+- 播客的 `podcast:transcript` 仍走工具包自己的白名单 HTTPS GET。
+
+其他约束：
 
 - 第一版只取字幕，不下载视频。
 - 取不到字幕就如实报告，工具包不内置任何绕过手段。
@@ -203,6 +213,7 @@ YouTube 的风险：字幕接口和视频下载都可能被反爬拦截。2026-1
 - **边界**（以 AGENTS.md 为准）：
   - 工具包不依赖核心 runtime 和 providers，也不调用模型。
   - 只对白名单 HTTPS 地址发 GET 请求：YouTube 的 feed 和字幕端点、为解析用户提供的频道 @handle 一次性抓取其频道页以取得 channel_id，以及用户明确添加的 feed 地址。不下载媒体，不内置反爬绕过。
+  - 唯一例外：YouTube 字幕通过调用用户自己安装的 `yt-dlp` 获取，只用白名单内的字幕参数，cookie 只在用户开启时使用（见第 5 节）。
   - 不下载任何媒体，不内置反爬绕过手段，不做调度和通知。
   - 本地状态目录在仓库之外，路径由用户配置；它和 CLI run index 是仅有的两种跨次记录。
 - **ASR 兜底**：需要下载音频，不在第一版范围内，启用前需另行决定。

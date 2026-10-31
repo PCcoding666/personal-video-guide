@@ -82,9 +82,11 @@ Deliberately out of scope: accounts, SaaS, a player, media (video/audio)
 downloads, anti-bot bypasses, bundled cookies, vector search, schedulers or
 notification senders inside the toolkit. Scheduling and delivery belong to the
 host. Network access is an allow-list of HTTPS GET requests (feed and caption
-endpoints, plus a one-time channel-page fetch to resolve a handle). Any cookies
-are supplied by you locally and are never stored in the repository, logs, or
-the state directory.
+endpoints, plus a one-time channel-page fetch to resolve a handle). YouTube
+captions are the one exception: they are fetched by running a `yt-dlp` you
+installed yourself, with subtitle-only arguments and never a media download.
+Browser cookies are off by default; if you turn them on in your profile, `yt-dlp`
+reads them from your own browser, and the package never stores or logs them.
 
 Originally prototyped inside [VidSnap](https://github.com/PCcoding666/Vidsnap)
 on the `feat/personal-video-guide` branch and split out on 2026-11-01.

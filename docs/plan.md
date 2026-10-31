@@ -14,7 +14,7 @@
 
 - 遵守 AGENTS.md 中关于 personal video guide 的条款：
   - 代码放在 `src/video_guide/`，不依赖核心 runtime 和 providers，不调用模型。
-  - 只对白名单 HTTPS 地址发 GET 请求，不下载媒体，不内置反爬绕过，不做调度和通知。
+  - 只对白名单 HTTPS 地址发 GET 请求，不下载媒体，不内置反爬绕过，不做调度和通知；唯一例外是调用用户自己安装的 `yt-dlp` 只取字幕（见 Task 4）。
   - 本地状态默认放在 `~/.video-guide/`，可用环境变量 `VIDSNAP_GUIDE_HOME` 改写；不写进仓库。
 - 不改现有 Harness 的 public contracts、CLI、recipe、RunBundle、run index 和 conformance 行为。
 - 测试离线且确定：网络通过 `httpx.MockTransport` 注入，时钟通过参数注入。测试数据在测试代码里手写，不提交真实字幕、媒体或用户状态。
@@ -88,25 +88,30 @@
 
 ## Task 4：字幕获取与解析
 
-**Files:** `captions.py`、`tests/test_captions.py`。
+**Files:** `captions.py`、`models.py`（Profile 新增字幕设置）、`tests/test_captions.py`。
 
-**待用户决定（开始本任务前）：** 实测显示，不带 cookie 的字幕请求全部被拒，唯一跑通的路径是 `yt-dlp --skip-download` 加用户浏览器 cookie。两种做法：
+**已决定：方案 A（2026-11-01 用户决定）。** YouTube 字幕通过调用用户自己安装的 `yt-dlp` 获取，只取字幕；播客的 `podcast:transcript` 仍走 `fetch.py` 的白名单 HTTPS GET。边界写在 AGENTS.md 和设计第 5 节。
 
-- **A（建议）**：调用用户自己安装的 `yt-dlp`，只下载字幕、不下载媒体。cookie 来源（例如 `--cookies-from-browser chrome`）需用户在 profile 中明确开启。这超出了 AGENTS.md 现有的“只发白名单 HTTPS GET”条款，需要补充一句：允许调用用户自行安装的 `yt-dlp` 且仅取字幕。
-- **B**：自己实现 timedtext 请求，带上用户 cookie，只发 HTTPS GET，符合现有条款；但 YouTube 对网页端字幕请求有额外校验，很可能跑不通，需要先做一次小实验。
+**Interfaces:**
 
-不论选哪种，都要完成以下工作：
+- `Profile` 新增两个可选字段：`ytdlp_path: str | None = None`（缺省时从 `PATH` 查找）、`cookies_from_browser: str | None = None`（缺省不带 cookie；只接受 `chrome`、`firefox`、`safari`、`edge`、`brave`）。两个字段都有默认值，旧的 `profile.json` 照常可读，`schema_version` 保持 1。
+- `captions.py` 通过注入的 `run(argv, timeout) -> CompletedRun` 调用子进程，测试用假的 runner 替代，不真正执行 `yt-dlp`。
+- 参数只来自白名单：`--skip-download --write-subs --write-auto-subs --sub-langs <langs> --sub-format json3/vtt --no-playlist -o <临时目录模板>`，开启 cookie 时追加 `--cookies-from-browser <browser>`。视频 URL 只接受规范化后的 `https://www.youtube.com/watch?v=<id>`。
+
+步骤：
 
 - [ ] 先写失败测试：
   - VTT、SRT 和 JSON3 解析成带起止秒数的句子；
   - 自动字幕优先选 `en-orig` 原始轨，不选机器翻译的 `en`；人工字幕优先于自动字幕；
   - 字幕类型和语言如实标注；
-  - 取不到字幕时返回 `none` 及原因（例如 `bot_check`、`no_cookies`、`no_captions`），不抛出未处理异常；
-  - 缓存命中时不再请求网络；
-  - 字幕文本里的指令性内容原样作为数据返回；
-  - cookie 内容不进入缓存、日志或返回值。
-- [ ] 实现选定的路径和 `podcast:transcript` 路径。代理沿用系统环境变量，但在 profile 中允许关闭（实测中本机代理出现过 502）。
-- [ ] 测试通过后提交：`feat(guide): fetch and parse timed captions`。
+  - 生成的 argv 只含白名单参数，绝不含下载媒体的参数；只有 profile 开启时才出现 `--cookies-from-browser`；
+  - 找不到 `yt-dlp` 返回 `ytdlp_missing`；bot 检查返回 `bot_check`（未开启 cookie 时附带 `no_cookies` 提示）；没有字幕轨返回 `no_captions`；超时返回 `timeout`；都不抛出未处理异常；
+  - `yt-dlp` 的原始 stderr 不进入返回值；临时目录在成功和失败后都被删除；
+  - 缓存命中时不再调用 runner；
+  - 字幕文本里的指令性内容原样作为数据返回。
+- [ ] 实现 `captions.py` 和 `podcast:transcript` 路径；更新 AGENTS.md 的 Layout 段。
+- [ ] 跑全部 gates。用本机 `yt-dlp` 加 Chrome cookie 手动取一期字幕核对一次（不进 pytest，不提交字幕内容）。
+- [ ] 测试通过后提交：`feat: fetch and parse timed captions via user-installed yt-dlp`。
 
 ## Task 5：大纲、读取、检索与链接
 
