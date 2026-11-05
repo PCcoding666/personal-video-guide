@@ -89,6 +89,7 @@ def test_profile_without_caption_fields_still_loads(tmp_path: Path) -> None:
     assert profile.interests == ("ai",)
     assert profile.schema_version == 1
     assert profile.cookies_from_browser is None
+    assert profile.cookies_file is None
     assert profile.ytdlp_path is None
 
 

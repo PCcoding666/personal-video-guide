@@ -153,14 +153,18 @@ class GuideService:
         *,
         cookies_from_browser: str | None = None,
         set_cookies: bool = False,
+        cookies_file: str | None = None,
+        set_cookies_file: bool = False,
         ytdlp_path: str | None = None,
         set_ytdlp_path: bool = False,
     ) -> dict[str, Any]:
-        if not set_cookies and not set_ytdlp_path:
+        if not set_cookies and not set_cookies_file and not set_ytdlp_path:
             return {"ok": False, "error": "invalid_profile", "message": "Nothing to update."}
         data = self.store.profile().model_dump()
         if set_cookies:
             data["cookies_from_browser"] = cookies_from_browser
+        if set_cookies_file:
+            data["cookies_file"] = cookies_file
         if set_ytdlp_path:
             data["ytdlp_path"] = ytdlp_path
         try:

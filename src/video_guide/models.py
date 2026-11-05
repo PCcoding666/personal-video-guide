@@ -65,13 +65,25 @@ class Profile(GuideModel):
     # still loads, and schema_version stays 1.
     ytdlp_path: str | None = None
     cookies_from_browser: str | None = None
+    # Netscape cookies.txt path. The file is never opened here; only yt-dlp
+    # receives the path, and caption errors do not repeat it.
+    cookies_file: str | None = None
 
-    @field_validator("ytdlp_path", mode="before")
+    @field_validator("ytdlp_path", "cookies_file", mode="before")
     @classmethod
     def _blank_path(cls, value: object) -> object:
         if isinstance(value, str):
             stripped = value.strip()
             return stripped or None
+        return value
+
+    @field_validator("cookies_file")
+    @classmethod
+    def _safe_cookies_file(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value.startswith("-") or any(char in value for char in ("\n", "\r", "\x00")):
+            raise ValueError("cookies_file must be a file path and must not look like a flag")
         return value
 
     @field_validator("cookies_from_browser", mode="before")

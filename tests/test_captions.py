@@ -41,6 +41,7 @@ ALLOWED_FLAGS = {
     "--no-playlist",
     "-o",
     "--cookies-from-browser",
+    "--cookies",
 }
 FORBIDDEN_FLAGS = (
     "--extract-audio",
@@ -48,7 +49,6 @@ FORBIDDEN_FLAGS = (
     "--audio-format",
     "--format",
     "-f",
-    "--cookies",
     "--merge-output-format",
     "--remux-video",
     "--recode-video",
@@ -321,6 +321,7 @@ def test_argv_is_subtitle_only_and_url_is_canonical(tmp_path: Path) -> None:
     flags = [arg for arg in argv[1:] if arg.startswith("-")]
     assert set(flags) <= ALLOWED_FLAGS
     assert "--cookies-from-browser" not in argv
+    assert "--cookies" not in argv
     assert argv[argv.index("--sub-format") + 1] == SUB_FORMAT
     assert argv[argv.index("--sub-langs") + 1] == SUB_LANGS
     assert argv[-1] == URL
@@ -363,6 +364,11 @@ def test_profile_rejects_unknown_browser_and_blank_path() -> None:
         Profile(cookies_from_browser="chrome --extract-audio")
     assert Profile(ytdlp_path="  ").ytdlp_path is None
     assert Profile(cookies_from_browser="").cookies_from_browser is None
+    assert Profile(cookies_file="  ").cookies_file is None
+    with pytest.raises(ValidationError):
+        Profile(cookies_file="--extract-audio")
+    with pytest.raises(ValidationError):
+        Profile(cookies_file="cookies.txt\n--extract-audio")
 
 
 def test_missing_ytdlp_on_path_does_not_call_the_runner(tmp_path: Path) -> None:
@@ -400,6 +406,8 @@ def test_bot_check_without_cookies_sets_the_no_cookies_hint(tmp_path: Path) -> N
     assert outcome.failure.code == "bot_check"
     assert outcome.failure.hint == "no_cookies"
     assert "cookies_from_browser" in outcome.failure.message
+    assert "curl_cffi" in outcome.failure.message
+    assert "impersonate" in outcome.failure.message
     assert "Sign in" not in outcome.failure.message
     argv = seen["argv"]
     assert isinstance(argv, list)
@@ -417,7 +425,76 @@ def test_bot_check_with_cookies_has_no_hint(tmp_path: Path) -> None:
     assert outcome.failure is not None
     assert outcome.failure.code == "bot_check"
     assert outcome.failure.hint is None
+    assert "curl_cffi" in outcome.failure.message
     assert "Sign in" not in outcome.failure.message
+
+
+def test_http_429_is_rate_limited_not_a_bot_check(tmp_path: Path) -> None:
+    runner = _runner({}, stderr="ERROR: HTTP Error 429: Too Many Requests", returncode=1)
+    _store, outcome = _fetch(tmp_path, runner)
+    assert outcome.failure is not None
+    assert outcome.failure.code == "rate_limited"
+    assert outcome.failure.hint == "no_cookies"
+    assert "HTTP 429" in outcome.failure.message
+    assert "curl_cffi" in outcome.failure.message
+    assert "Too Many Requests" not in outcome.failure.message
+    _assert_no_leak(outcome)
+
+
+def test_sign_in_wall_wins_when_the_stderr_also_mentions_429(tmp_path: Path) -> None:
+    stderr = "HTTP Error 429: Too Many Requests\nSign in to confirm you're not a bot"
+    _store, outcome = _fetch(tmp_path, _runner({}, stderr=stderr, returncode=1))
+    assert outcome.failure is not None
+    assert outcome.failure.code == "bot_check"
+    assert "Sign in" not in outcome.failure.message
+
+
+def test_cookies_file_is_passed_as_cookies_and_never_echoed(tmp_path: Path) -> None:
+    secret = "NETSCAPE_SECRET_COOKIE_VALUE"
+    cookies_path = tmp_path / "cookies.txt"
+    cookies_path.write_text(
+        f"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\t{secret}\n",
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
+    profile = Profile(
+        cookies_from_browser="chrome",
+        cookies_file=str(cookies_path),
+    )
+    _store, outcome = _fetch(
+        tmp_path / "state",
+        _runner({}, stderr="ERROR: HTTP Error 429: Too Many Requests", returncode=1, seen=seen),
+        profile=profile,
+    )
+    argv = seen["argv"]
+    assert isinstance(argv, list)
+    assert argv[argv.index("--cookies") + 1] == str(cookies_path)
+    assert "--cookies-from-browser" not in argv
+    assert outcome.failure is not None
+    assert outcome.failure.code == "rate_limited"
+    assert outcome.failure.hint is None
+    blob = outcome.failure.message
+    assert secret not in blob
+    assert str(cookies_path) not in blob
+    assert "Too Many Requests" not in blob
+
+
+def test_missing_cookies_file_does_not_run_or_reveal_the_path(tmp_path: Path) -> None:
+    missing = tmp_path / "no-such-cookies.txt"
+    secret_name = missing.name
+
+    def boom(argv: list[str], timeout: float) -> CompletedRun:
+        raise AssertionError("runner should not be called")
+
+    _store, outcome = _fetch(
+        tmp_path / "state",
+        boom,
+        profile=Profile(cookies_file=str(missing)),
+    )
+    assert outcome.failure is not None
+    assert outcome.failure.code == "cookies_file_missing"
+    assert str(missing) not in outcome.failure.message
+    assert secret_name not in outcome.failure.message
 
 
 def test_no_captions_and_timeout_are_structured(tmp_path: Path) -> None:

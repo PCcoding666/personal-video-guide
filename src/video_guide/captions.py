@@ -39,7 +39,13 @@ _ARROW = re.compile(rf"({_STAMP})\s*-->\s*({_STAMP})")
 _TAG = re.compile(r"<[^>]*>")
 _WROTE_MANUAL = re.compile(r"Writing video subtitles to:\s*(.+)$", re.IGNORECASE)
 _WROTE_AUTO = re.compile(r"Writing video automatic captions to:\s*(.+)$", re.IGNORECASE)
-_BOT_MARKERS = ("not a bot", "http error 429", "too many requests")
+_BOT_MARKERS = ("not a bot",)
+_RATE_LIMIT_MARKERS = ("http error 429", "too many requests")
+_IMPERSONATE_NOTE = (
+    " yt-dlp can impersonate a browser when curl_cffi is installed in the same "
+    "environment as yt-dlp. Install curl-cffi beside yt-dlp, or "
+    "pip install 'personal-video-guide[impersonate]' when they share one environment."
+)
 _NO_CAPTION_MARKERS = (
     "no subtitles",
     "there are no subtitles",
@@ -310,10 +316,24 @@ def fetch_youtube_captions(
     if browser is not None and browser not in COOKIE_BROWSERS:
         allowed = ", ".join(COOKIE_BROWSERS)
         return _fail("invalid_profile", f"cookies_from_browser must be one of: {allowed}")
+    cookies_file = _cookies_file_arg(active.cookies_file)
+    if active.cookies_file and cookies_file is None:
+        return _fail(
+            "invalid_profile",
+            "cookies_file must be a file path and must not look like a flag.",
+        )
+    if cookies_file is not None and not Path(cookies_file).is_file():
+        return _fail(
+            "cookies_file_missing",
+            "The configured Netscape cookies file is missing or not a file.",
+        )
+    # A file and a browser both set: pass the file only. yt-dlp rejects the pair.
+    if cookies_file is not None:
+        browser = None
     run = runner or default_runner
     with tempfile.TemporaryDirectory(prefix="video-guide-captions-") as tmp:
         template = str(Path(tmp) / "%(id)s.%(ext)s")
-        argv = _build_argv(executable, video_id, template, browser)
+        argv = _build_argv(executable, video_id, template, browser, cookies_file)
         try:
             completed = run(argv, timeout)
         except (RunnerTimeout, subprocess.TimeoutExpired):
@@ -322,7 +342,13 @@ def fetch_youtube_captions(
             return _fail("ytdlp_missing", missing or "yt-dlp was not found.")
         except OSError:
             return _fail("ytdlp_failed", "yt-dlp could not be started.")
-        outcome = _interpret(completed, Path(tmp), video_id, cookies_enabled=browser is not None)
+        outcome = _interpret(
+            completed,
+            Path(tmp),
+            video_id,
+            cookies_enabled=browser is not None or cookies_file is not None,
+        )
+    outcome = _without_cookies_path(outcome, cookies_file)
     if outcome.transcript is not None:
         store.save_caption(outcome.transcript)
     return outcome
@@ -415,7 +441,26 @@ def acquire_captions(
     return _fail("bad_url", youtube_error or "need a YouTube video id or an http(s) YouTube url")
 
 
-def _build_argv(executable: str, video_id: str, template: str, browser: str | None) -> list[str]:
+def _cookies_file_arg(path: str | None) -> str | None:
+    """Return a path safe to place after ``--cookies``, or None when it is unset.
+
+    Paths that start with ``-`` would be another yt-dlp flag. This function
+    does not open the file.
+    """
+    if path is None:
+        return None
+    if path.startswith("-") or any(char in path for char in ("\n", "\r", "\x00")):
+        return None
+    return path
+
+
+def _build_argv(
+    executable: str,
+    video_id: str,
+    template: str,
+    browser: str | None,
+    cookies_file: str | None,
+) -> list[str]:
     argv = [
         executable,
         "--skip-download",
@@ -429,10 +474,28 @@ def _build_argv(executable: str, video_id: str, template: str, browser: str | No
         "-o",
         template,
     ]
-    if browser is not None:
+    if cookies_file is not None:
+        argv.extend(["--cookies", cookies_file])
+    elif browser is not None:
         argv.extend(["--cookies-from-browser", browser])
     argv.append(f"https://www.youtube.com/watch?v={video_id}")
     return argv
+
+
+def _without_cookies_path(outcome: CaptionOutcome, cookies_file: str | None) -> CaptionOutcome:
+    """Drop the cookies path from any failure text. Success payloads have no path."""
+    if cookies_file is None or outcome.failure is None:
+        return outcome
+    if cookies_file not in outcome.failure.message:
+        return outcome
+    cleaned = outcome.failure.message.replace(cookies_file, "the configured cookies file")
+    return CaptionOutcome(
+        failure=CaptionFailure(
+            code=outcome.failure.code,
+            message=cleaned,
+            hint=outcome.failure.hint,
+        )
+    )
 
 
 def _resolve_executable(profile: Profile, which: Which) -> tuple[str | None, str | None]:
@@ -465,20 +528,13 @@ def _interpret(
     if transcript is not None:
         return CaptionOutcome(transcript=transcript)
     blob = f"{completed.stdout}\n{completed.stderr}".casefold()
+    # The sign-in wall is a bot check. HTTP 429 without that phrase is its own
+    # code: live fetches from a cloud IP mostly returned 429, and the sign-in
+    # page was the exception.
     if any(marker in blob for marker in _BOT_MARKERS):
-        if cookies_enabled:
-            return _fail(
-                "bot_check",
-                "YouTube blocked the caption request (bot check) even with browser cookies. "
-                "The guide will not try to bypass that.",
-            )
-        return _fail(
-            "bot_check",
-            "YouTube blocked the caption request (bot check). Browser cookies are off by "
-            "default. Set profile cookies_from_browser to chrome, firefox, safari, edge, "
-            "or brave and retry.",
-            hint="no_cookies",
-        )
+        return _blocked("bot_check", cookies_enabled=cookies_enabled)
+    if any(marker in blob for marker in _RATE_LIMIT_MARKERS):
+        return _blocked("rate_limited", cookies_enabled=cookies_enabled)
     if completed.returncode == 0 or any(marker in blob for marker in _NO_CAPTION_MARKERS):
         return _fail("no_captions", "No caption track was written for this video.")
     return _fail("ytdlp_failed", "yt-dlp exited without writing a caption track.")
@@ -589,6 +645,26 @@ def _cached(store: GuideStore, video_id: str) -> CaptionOutcome | None:
     if loaded is None:
         return None
     return CaptionOutcome(transcript=loaded, cached=True)
+
+
+def _blocked(code: str, *, cookies_enabled: bool) -> CaptionOutcome:
+    if code == "rate_limited":
+        lead = "YouTube rate-limited the caption download (HTTP 429)."
+    else:
+        lead = "YouTube blocked the caption request (bot check)."
+    if cookies_enabled:
+        message = (
+            f"{lead} Cookies were enabled. The guide will not try to bypass that."
+            f"{_IMPERSONATE_NOTE}"
+        )
+        return _fail(code, message)
+    message = (
+        f"{lead} Browser cookies and a cookies file are both off by default. "
+        "Set profile cookies_from_browser to chrome, firefox, safari, edge, or brave, "
+        "or set profile cookies_file to a Netscape cookies.txt path, and retry."
+        f"{_IMPERSONATE_NOTE}"
+    )
+    return _fail(code, message, hint="no_cookies")
 
 
 def _fail(code: str, message: str, *, hint: str | None = None) -> CaptionOutcome:

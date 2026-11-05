@@ -21,6 +21,9 @@ video-guide = "video_guide.cli:main"
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.0,<2"]
+# curl-cffi is yt-dlp's optional impersonation dependency. Install this extra
+# only when yt-dlp runs from the same Python environment as this package.
+impersonate = ["curl-cffi>=0.7"]
 dev = [
     "mypy>=1.10,<3",
     "pytest>=8,<10",

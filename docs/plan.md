@@ -109,7 +109,7 @@
   - `yt-dlp` 的原始 stderr 不进入返回值；临时目录在成功和失败后都被删除；
   - 缓存命中时不再调用 runner；
   - 字幕文本里的指令性内容原样作为数据返回。
-- [x] 实现 `captions.py` 和 `podcast:transcript` 路径；更新 AGENTS.md 的 Layout 段。播客转录的 CLI 入口还没接上：RSS 会记下 `podcast:transcript` URL，`load_podcast_transcript` 能拉取并解析，`video-guide transcript get` 目前只接受 YouTube URL。
+- [x] 实现 `captions.py` 和 `podcast:transcript` 路径；更新 AGENTS.md 的 Layout 段。播客转录的 CLI 入口还没接上：RSS 会记下 `podcast:transcript` URL，`load_podcast_transcript` 能拉取并解析，`video-guide transcript get` 目前只接受 YouTube URL。后续补充：profile 的 `cookies_file`（Netscape cookies.txt，传给 yt-dlp 的 `--cookies`，路径不进错误文本）；字幕 HTTP 429 单独为 `rate_limited`，与 `bot_check` 分开；`bot_check` / `rate_limited` 提示安装 `curl_cffi`（optional extra `impersonate`）；YouTube 频道 feed 的 404/5xx 最多重试 3 次。
 - [x] 离线 gates（`ruff format --check`、`ruff check`、`mypy src`、`pytest`、`git diff --check`）通过。
 - [ ] 用本机 `yt-dlp` 加 Chrome cookie 手动取一期字幕核对一次（不进 pytest，不提交字幕内容）。这次没有在带已登录浏览器的机器上重跑。
 - [x] 测试通过后提交：`feat: fetch and parse timed captions via user-installed yt-dlp`。

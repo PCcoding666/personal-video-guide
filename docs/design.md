@@ -132,8 +132,8 @@ YouTube 字幕的获取方式已定为方案 A（2026-11-01 用户决定）：�
 
 - 工具包不安装、不打包、不锁定 `yt-dlp` 版本。从 `PATH` 或 profile 里配置的路径查找；找不到时返回 `ytdlp_missing`，并提示用户自行安装。
 - 只用固定的参数白名单：`--skip-download`、`--write-subs`、`--write-auto-subs`、`--sub-langs`、`--sub-format json3/vtt`、`-o` 指向临时目录、`--no-playlist`；不传任何会下载音视频的参数。
-- cookie 默认关闭。只有用户在 profile 里填写了 `cookies_from_browser`（例如 `chrome`）时，才追加 `--cookies-from-browser <browser>`。工具包从不读取、复制或保存 cookie 内容。
-- 每次调用有超时；输出写进临时目录，解析完即删除。错误按原因归类为 `bot_check`、`no_cookies`、`no_captions`、`ytdlp_missing`、`timeout`，不把 `yt-dlp` 的原始输出写进日志或返回值。
+- cookie 默认关闭。用户可以在 profile 里填写 `cookies_from_browser`（例如 `chrome`），此时追加 `--cookies-from-browser <browser>`；也可以填写 Netscape `cookies.txt` 的路径 `cookies_file`，此时追加 `--cookies <path>`。两者都设置时只传 `--cookies`。工具包从不打开该文件，不把路径写进字幕错误或日志，也不读取、复制或保存 cookie 内容。
+- 每次调用有超时；输出写进临时目录，解析完即删除。错误按原因归类为 `bot_check`（YouTube 要求登录的那句）、`rate_limited`（字幕下载 HTTP 429）、`no_cookies`（前两者在未配置 cookie 时的提示）、`no_captions`、`ytdlp_missing`、`timeout`。`bot_check` 和 `rate_limited` 的说明里会提到 yt-dlp 的可选依赖 `curl_cffi`（本包的 `impersonate` extra，装到与 yt-dlp 相同的环境）。不把 `yt-dlp` 的原始输出写进日志或返回值。
 - 播客的 `podcast:transcript` 仍走工具包自己的白名单 HTTPS GET。
 
 其他约束：

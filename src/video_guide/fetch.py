@@ -24,6 +24,10 @@ DEFAULT_MAX_BYTES = 5 * 1024 * 1024
 class FetchError(Exception):
     """A fetch was refused by policy or failed at the transport level."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class Fetcher:
     """Perform allow-listed HTTPS GETs, aborting oversized downloads."""
@@ -58,7 +62,10 @@ class Fetcher:
                 client.stream("GET", url) as response,
             ):
                 if response.status_code != 200:
-                    raise FetchError(f"unexpected status {response.status_code} for {url!r}")
+                    raise FetchError(
+                        f"unexpected status {response.status_code} for {url!r}",
+                        status_code=response.status_code,
+                    )
                 body = bytearray()
                 for chunk in response.iter_bytes():
                     body.extend(chunk)

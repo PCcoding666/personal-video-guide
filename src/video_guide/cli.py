@@ -139,8 +139,18 @@ def profile_set(
         "--clear-cookies",
         help="Turn browser cookies back off.",
     ),
+    cookies: str | None = typer.Option(
+        None,
+        "--cookies",
+        help="Path to a Netscape cookies.txt file. The file is not read or logged.",
+    ),
+    clear_cookies_file: bool = typer.Option(
+        False,
+        "--clear-cookies-file",
+        help="Forget the cookies file path.",
+    ),
 ) -> None:
-    """Update caption settings. Cookie contents are never stored."""
+    """Update caption settings. Cookie contents are never read or stored."""
     if clear_cookies and cookies_from_browser is not None:
         _emit(
             {
@@ -150,11 +160,22 @@ def profile_set(
             }
         )
         return
+    if clear_cookies_file and cookies is not None:
+        _emit(
+            {
+                "ok": False,
+                "error": "invalid_profile",
+                "message": "Pass either --cookies or --clear-cookies-file.",
+            }
+        )
+        return
 
     def apply() -> Mapping[str, Any]:
         return _service().update_profile(
             cookies_from_browser=None if clear_cookies else cookies_from_browser,
             set_cookies=clear_cookies or cookies_from_browser is not None,
+            cookies_file=None if clear_cookies_file else cookies,
+            set_cookies_file=clear_cookies_file or cookies is not None,
             ytdlp_path=ytdlp_path,
             set_ytdlp_path=ytdlp_path is not None,
         )

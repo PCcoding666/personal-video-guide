@@ -9,16 +9,25 @@ overlap window and not already marked seen. Feed text is treated as data.
 
 from __future__ import annotations
 
+import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from urllib.parse import urlsplit
 
-from .fetch import Fetcher
+from .fetch import Fetcher, FetchError
 from .models import Source, SourceKind, VideoItem
 
 OVERLAP = timedelta(hours=48)
+# YouTube channel feeds from a cloud IP have been seen to alternate 200 and
+# 404. Retry only that host's feed, and only 404 or 5xx, a few times.
+YOUTUBE_FEED_ATTEMPTS = 3
+YOUTUBE_FEED_BACKOFF_SECONDS = (0.4, 0.8)
+_YOUTUBE_FEED_HOSTS = frozenset({"youtube.com", "www.youtube.com", "m.youtube.com"})
+
+Sleeper = Callable[[float], None]
 
 _ATOM = "{http://www.w3.org/2005/Atom}"
 _YT = "{http://www.youtube.com/xml/schemas/2015}"
@@ -147,6 +156,31 @@ def parse_podcast_rss(xml: bytes, source_id: str) -> list[VideoItem]:
     return items
 
 
+def _is_youtube_feed(url: str) -> bool:
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    return host in _YOUTUBE_FEED_HOSTS and parts.path == "/feeds/videos.xml"
+
+
+def _retryable_feed_status(status: int | None) -> bool:
+    return status == 404 or (status is not None and 500 <= status <= 599)
+
+
+def _fetch_feed(url: str, *, fetcher: Fetcher, sleeper: Sleeper) -> bytes:
+    """GET a feed, retrying a flaky YouTube 404 or 5xx with a short backoff."""
+    if not _is_youtube_feed(url):
+        return fetcher.get(url)
+    for attempt in range(YOUTUBE_FEED_ATTEMPTS):
+        try:
+            return fetcher.get(url)
+        except FetchError as exc:
+            last = attempt == YOUTUBE_FEED_ATTEMPTS - 1
+            if last or not _retryable_feed_status(exc.status_code):
+                raise
+            sleeper(YOUTUBE_FEED_BACKOFF_SECONDS[attempt])
+    raise FetchError(f"youtube feed failed after {YOUTUBE_FEED_ATTEMPTS} attempts: {url!r}")
+
+
 def check_source(
     source: Source,
     *,
@@ -154,10 +188,11 @@ def check_source(
     is_seen: Callable[[str], bool],
     now: datetime,
     overlap: timedelta = OVERLAP,
+    sleeper: Sleeper = time.sleep,
 ) -> SourceCheck:
     """Fetch and parse one source, returning fresh, unseen items in isolation."""
     try:
-        raw = fetcher.get(source.rss_url)
+        raw = _fetch_feed(source.rss_url, fetcher=fetcher, sleeper=sleeper)
         if source.kind is SourceKind.YOUTUBE:
             parsed = parse_youtube_atom(raw, source.id)
         else:
@@ -181,10 +216,18 @@ def check_feeds(
     is_seen: Callable[[str], bool],
     now: datetime,
     overlap: timedelta = OVERLAP,
+    sleeper: Sleeper = time.sleep,
 ) -> FeedCheck:
     """Check every source, aggregating new items and per-source outcomes."""
     checks: Sequence[SourceCheck] = [
-        check_source(source, fetcher=fetcher, is_seen=is_seen, now=now, overlap=overlap)
+        check_source(
+            source,
+            fetcher=fetcher,
+            is_seen=is_seen,
+            now=now,
+            overlap=overlap,
+            sleeper=sleeper,
+        )
         for source in sources
     ]
     new_videos = [video for check in checks if check.ok for video in check.new_videos]

@@ -93,20 +93,34 @@ never before zero. `timestamp` is the clock for the moment you asked about.
 `playback_timestamp` is the clock for the `t=` value. Both come from the tool.
 
 YouTube often refuses caption requests that carry no cookies. Cookies stay off
-until you opt in. The package never reads or stores them; yt-dlp reads them
-from the browser you name:
+until you opt in. The package never opens a cookie file and never puts the
+path or the contents in caption errors. yt-dlp reads them itself, either from
+a browser or from a Netscape `cookies.txt` you already have (useful on a
+machine with no local browser):
 
 ```bash
 video-guide profile set --cookies-from-browser chrome
+video-guide profile set --cookies /path/to/cookies.txt
 video-guide profile set --clear-cookies
+video-guide profile set --clear-cookies-file
 video-guide profile set --ytdlp-path /path/to/yt-dlp
 ```
 
 Allowed browser names are `chrome`, `firefox`, `safari`, `edge`, and `brave`.
-A missing yt-dlp returns `ytdlp_missing`. A YouTube bot check returns
-`bot_check`; with cookies still off, the hint is `no_cookies`. A video with no
-caption track returns `no_captions`. The tool does not invent a quote or a
-timestamp when that happens.
+When both a browser and a cookies file are set, the file is what yt-dlp
+receives. `profile show` prints the path you saved; caption commands do not.
+
+A missing yt-dlp returns `ytdlp_missing`. The YouTube sign-in wall returns
+`bot_check`. HTTP 429 on the subtitle download returns `rate_limited`. With
+cookies still off, either error includes the hint `no_cookies`. Both messages
+also mention `curl_cffi`: yt-dlp uses it to impersonate a browser, and warns
+when it is missing. Install it beside yt-dlp, or, when yt-dlp shares this
+environment, `python -m pip install 'personal-video-guide[impersonate]'`.
+A video with no caption track returns `no_captions`. The tool does not invent
+a quote or a timestamp when that happens.
+
+YouTube channel feeds that answer 404 or 5xx are retried up to three times,
+with a short backoff, before that source is reported as failed.
 
 `transcript outline` prints chapters parsed from description lines such as
 `00:00 Intro` when a description is passed with `--description`. Otherwise it

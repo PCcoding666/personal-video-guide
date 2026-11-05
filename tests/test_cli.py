@@ -176,6 +176,26 @@ def test_cli_profile_cookies_round_trip(guide_home: Path) -> None:
     assert _payload(cleared)["cookies_from_browser"] is None
 
 
+def test_cli_profile_cookies_file_round_trip(guide_home: Path, tmp_path: Path) -> None:
+    secret = "NETSCAPE_SECRET_COOKIE_VALUE"
+    cookies_path = tmp_path / "cookies.txt"
+    cookies_path.write_text(f"# Netscape HTTP Cookie File\nSID\t{secret}\n", encoding="utf-8")
+    refused = RUNNER.invoke(app, ["profile", "set", "--cookies", "--extract-audio"])
+    assert refused.exit_code == 1
+    assert _payload(refused)["error"] == "invalid_profile"
+    assert secret not in refused.stdout
+
+    saved = RUNNER.invoke(app, ["profile", "set", "--cookies", str(cookies_path)])
+    assert saved.exit_code == 0
+    assert secret not in saved.stdout
+    shown = _payload(RUNNER.invoke(app, ["profile", "show"]))
+    assert shown["cookies_file"] == str(cookies_path)
+
+    cleared = RUNNER.invoke(app, ["profile", "set", "--clear-cookies-file"])
+    assert cleared.exit_code == 0
+    assert _payload(cleared)["cookies_file"] is None
+
+
 def test_cli_rejects_a_non_http_link(guide_home: Path) -> None:
     result = RUNNER.invoke(app, ["link", "javascript:alert(1)", "10"])
     assert result.exit_code == 1
