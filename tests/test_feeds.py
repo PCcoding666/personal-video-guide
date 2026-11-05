@@ -40,9 +40,48 @@ ATOM = """<?xml version="1.0" encoding="UTF-8"?>
 </feed>
 """
 
+ATOM_BAD_DATE = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"
+      xmlns:media="http://search.yahoo.com/mrss/"
+      xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <yt:videoId>BADVID</yt:videoId>
+    <title>Broken video</title>
+    <published>not-a-date</published>
+  </entry>
+  <entry>
+    <yt:videoId>VID111</yt:videoId>
+    <title>First video</title>
+    <link rel="alternate" href="https://www.youtube.com/watch?v=VID111"/>
+    <published>2026-10-30T12:00:00+00:00</published>
+  </entry>
+</feed>
+"""
+
 RSS = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
   <channel>
+    <item>
+      <guid>EP1</guid>
+      <title>Episode 1</title>
+      <link>https://pod.example/ep1</link>
+      <pubDate>Fri, 30 Oct 2026 12:00:00 +0000</pubDate>
+      <description>Pod desc</description>
+    </item>
+  </channel>
+</rss>
+"""
+
+RSS_BAD_DATE = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <guid>BAD</guid>
+      <title>Broken episode</title>
+      <link>https://pod.example/bad</link>
+      <pubDate>not-a-date</pubDate>
+      <description>Bad</description>
+    </item>
     <item>
       <guid>EP1</guid>
       <title>Episode 1</title>
@@ -155,6 +194,18 @@ def test_parse_podcast_rss() -> None:
     assert items[0].published_at == datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
 
 
+def test_parse_podcast_rss_skips_malformed_pubdate() -> None:
+    items = parse_podcast_rss(RSS_BAD_DATE.encode("utf-8"), "src")
+    assert [item.video_id for item in items] == ["EP1"]
+    assert items[0].published_at == datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
+
+
+def test_parse_youtube_atom_skips_malformed_published() -> None:
+    items = parse_youtube_atom(ATOM_BAD_DATE.encode("utf-8"), "src")
+    assert [item.video_id for item in items] == ["VID111"]
+    assert items[0].published_at == datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
+
+
 # --- discovery: dedup, window, isolation ---------------------------------------
 
 
@@ -172,6 +223,20 @@ def test_check_source_skips_already_seen() -> None:
     )
     assert result.ok is True
     assert [v.video_id for v in result.new_videos] == ["VID222"]
+
+
+def test_check_source_skips_malformed_date_and_advances_checkpoint() -> None:
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    fetcher = _fetcher({YT_RSS: _response(ATOM_BAD_DATE)})
+    result = check_source(
+        _youtube_source(),
+        fetcher=fetcher,
+        is_seen=lambda vid: False,
+        now=now,
+    )
+    assert result.ok is True
+    assert [video.video_id for video in result.new_videos] == ["VID111"]
+    assert result.next_checked_at == now
 
 
 def test_check_source_applies_48h_overlap_window() -> None:

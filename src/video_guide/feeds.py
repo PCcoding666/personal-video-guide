@@ -48,6 +48,24 @@ def _aware(moment: datetime) -> datetime:
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
 
 
+def _parse_rfc2822(text: str) -> datetime | None:
+    try:
+        parsed: datetime | None = parsedate_to_datetime(text)
+    except (ValueError, TypeError, IndexError, OverflowError):
+        return None
+    if parsed is None:
+        return None
+    return _aware(parsed)
+
+
+def _parse_iso(text: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (ValueError, TypeError, IndexError, OverflowError):
+        return None
+    return _aware(parsed)
+
+
 def _text(element: ET.Element | None) -> str:
     if element is None or element.text is None:
         return ""
@@ -62,6 +80,9 @@ def parse_youtube_atom(xml: bytes, source_id: str) -> list[VideoItem]:
         video_id = _text(entry.find(f"{_YT}videoId"))
         published = _text(entry.find(f"{_ATOM}published"))
         if not video_id or not published:
+            continue
+        published_at = _parse_iso(published)
+        if published_at is None:
             continue
         title = _text(entry.find(f"{_ATOM}title")) or video_id
         url = f"https://www.youtube.com/watch?v={video_id}"
@@ -78,7 +99,7 @@ def parse_youtube_atom(xml: bytes, source_id: str) -> list[VideoItem]:
                 video_id=video_id,
                 title=title,
                 url=url,
-                published_at=_aware(datetime.fromisoformat(published)),
+                published_at=published_at,
                 summary=summary[:8_000],
             )
         )
@@ -97,6 +118,9 @@ def parse_podcast_rss(xml: bytes, source_id: str) -> list[VideoItem]:
         published = _text(item.find("pubDate"))
         if not identifier or not published:
             continue
+        published_at = _parse_rfc2822(published)
+        if published_at is None:
+            continue
         link = _text(item.find("link"))
         items.append(
             VideoItem(
@@ -104,7 +128,7 @@ def parse_podcast_rss(xml: bytes, source_id: str) -> list[VideoItem]:
                 video_id=identifier,
                 title=_text(item.find("title")) or identifier,
                 url=link or f"podcast:{identifier}",
-                published_at=_aware(parsedate_to_datetime(published)),
+                published_at=published_at,
                 summary=_text(item.find("description"))[:8_000],
             )
         )
@@ -126,7 +150,7 @@ def check_source(
             parsed = parse_youtube_atom(raw, source.id)
         else:
             parsed = parse_podcast_rss(raw, source.id)
-    except Exception as exc:  # isolate: one source's failure must not sink others
+    except Exception as exc:  # noqa: BLE001  # isolate: one source's failure must not sink others
         return SourceCheck(source_id=source.id, ok=False, error=str(exc))
 
     cutoff = source.last_checked_at - overlap if source.last_checked_at is not None else None
