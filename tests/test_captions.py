@@ -963,14 +963,39 @@ def test_unrelated_permission_error_is_not_cookies_unreadable(tmp_path: Path) ->
     assert outcome.failure.code == "ytdlp_failed"
 
 
-def test_ytdlp_beside_the_interpreter_is_used(
+def _point_interpreter(
+    monkeypatch: pytest.MonkeyPatch, executable: Path, *, scripts: Path, prefix: Path
+) -> None:
+    monkeypatch.setattr("video_guide.captions.sys.executable", str(executable))
+    monkeypatch.setattr("video_guide.captions.sys.prefix", str(prefix))
+
+    def get_path(name: str, *_args: object, **_kwargs: object) -> str | None:
+        if name == "scripts":
+            return str(scripts)
+        return None
+
+    monkeypatch.setattr("video_guide.captions.sysconfig.get_path", get_path)
+
+
+def test_ytdlp_beside_a_symlinked_interpreter_is_used(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    bindir = tmp_path / "venv" / "bin"
-    bindir.mkdir(parents=True)
-    ytdlp = bindir / "yt-dlp"
+    # uv venvs symlink bin/python at a managed CPython. resolve() would leave the venv.
+    real_bin = tmp_path / "managed" / "bin"
+    real_bin.mkdir(parents=True)
+    real_python = real_bin / "python3.12"
+    real_python.write_text("", encoding="utf-8")
+    decoy = real_bin / "yt-dlp"
+    decoy.write_text("", encoding="utf-8")
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    link = venv_bin / "python"
+    link.symlink_to(real_python)
+    ytdlp = venv_bin / "yt-dlp"
     ytdlp.write_text("", encoding="utf-8")
-    monkeypatch.setattr("video_guide.captions._interpreter_bin_dir", lambda: bindir)
+    empty = tmp_path / "empty-scripts"
+    empty.mkdir()
+    _point_interpreter(monkeypatch, link, scripts=empty, prefix=tmp_path / "empty-prefix")
     seen: dict[str, object] = {}
     files = {f"{VIDEO_ID}.en.vtt": _vtt("00:00:01.000", "00:00:02.000", "from venv")}
 
@@ -981,5 +1006,64 @@ def test_ytdlp_beside_the_interpreter_is_used(
     argv = seen["argv"]
     assert isinstance(argv, list)
     assert argv[0] == str(ytdlp)
+    assert argv[0] != str(decoy)
     assert outcome.transcript is not None
     assert outcome.transcript.sentences[0].text == "from venv"
+
+
+def test_ytdlp_in_the_scripts_dir_is_used_when_not_beside_the_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_bin = tmp_path / "managed" / "bin"
+    real_bin.mkdir(parents=True)
+    real_python = real_bin / "python3.12"
+    real_python.write_text("", encoding="utf-8")
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    link = venv_bin / "python"
+    link.symlink_to(real_python)
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    ytdlp = scripts / "yt-dlp"
+    ytdlp.write_text("", encoding="utf-8")
+    _point_interpreter(monkeypatch, link, scripts=scripts, prefix=tmp_path / "empty-prefix")
+    seen: dict[str, object] = {}
+    files = {f"{VIDEO_ID}.en.vtt": _vtt("00:00:01.000", "00:00:02.000", "from scripts")}
+
+    def which(name: str) -> None:
+        assert name == "yt-dlp"
+
+    _store, outcome = _fetch(tmp_path / "state", _runner(files, seen=seen), which=which)
+    argv = seen["argv"]
+    assert isinstance(argv, list)
+    assert argv[0] == str(ytdlp)
+    assert outcome.transcript is not None
+
+
+def test_ytdlp_next_to_the_resolved_interpreter_is_a_last_resort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_bin = tmp_path / "managed" / "bin"
+    real_bin.mkdir(parents=True)
+    real_python = real_bin / "python3.12"
+    real_python.write_text("", encoding="utf-8")
+    ytdlp = real_bin / "yt-dlp"
+    ytdlp.write_text("", encoding="utf-8")
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    link = venv_bin / "python"
+    link.symlink_to(real_python)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    _point_interpreter(monkeypatch, link, scripts=empty, prefix=empty)
+    seen: dict[str, object] = {}
+    files = {f"{VIDEO_ID}.en.vtt": _vtt("00:00:01.000", "00:00:02.000", "from managed")}
+
+    def which(name: str) -> None:
+        assert name == "yt-dlp"
+
+    _store, outcome = _fetch(tmp_path / "state", _runner(files, seen=seen), which=which)
+    argv = seen["argv"]
+    assert isinstance(argv, list)
+    assert argv[0] == str(ytdlp)
+    assert outcome.transcript is not None

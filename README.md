@@ -76,7 +76,9 @@ install, bundle, or pin it. Current yt-dlp needs a JavaScript runtime to solve
 YouTube's player script; install [deno](https://docs.deno.com/) and
 `python -m pip install -U "yt-dlp[default]"` (that extra pulls `yt-dlp-ejs`).
 If `yt-dlp` is installed in the same virtualenv as this package, it is found
-next to the Python interpreter even when it is not on `PATH`.
+there even when it is not on `PATH`. That includes a uv venv, where
+`bin/python` is a symlink to a managed CPython: the lookup uses the symlink's
+own directory before following it.
 
 ```bash
 python -m pip install -e .

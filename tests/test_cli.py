@@ -159,7 +159,7 @@ def test_cli_link_does_not_fetch_captions(
 def test_cli_reports_missing_ytdlp(guide_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("video_guide.captions.shutil.which", lambda _name: None)
     monkeypatch.setattr(
-        "video_guide.captions._interpreter_bin_dir", lambda: guide_home / "empty-bin"
+        "video_guide.captions._candidate_bin_dirs", lambda: [guide_home / "empty-bin"]
     )
     result = RUNNER.invoke(app, ["transcript", "get", URL])
     assert result.exit_code == 1

@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import time
 from collections.abc import Callable, Sequence
@@ -698,8 +699,33 @@ def _without_cookies_path(outcome: CaptionOutcome, cookies_file: str | None) -> 
     )
 
 
-def _interpreter_bin_dir() -> Path:
-    return Path(sys.executable).resolve().parent
+def _candidate_bin_dirs() -> list[Path]:
+    """Directories that may hold yt-dlp for this interpreter.
+
+    ``Path.resolve()`` follows symlinks. A uv venv's ``bin/python`` points at
+    uv's managed CPython, so the resolved parent is outside the venv and does
+    not contain the venv's ``yt-dlp``. Check the unresolved parent first, then
+    the installer's scripts directory and ``sys.prefix/bin``, and only then the
+    resolved interpreter directory.
+    """
+    executable = Path(sys.executable)
+    ordered: list[Path] = [executable.parent]
+    scripts = sysconfig.get_path("scripts")
+    if scripts:
+        ordered.append(Path(scripts))
+    prefix = Path(sys.prefix)
+    ordered.append(prefix / "bin")
+    ordered.append(prefix / "Scripts")
+    ordered.append(executable.resolve().parent)
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for directory in ordered:
+        key = str(directory)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(directory)
+    return unique
 
 
 def _resolve_executable(profile: Profile, which: Which) -> tuple[str | None, str | None]:
@@ -714,11 +740,11 @@ def _resolve_executable(profile: Profile, which: Which) -> tuple[str | None, str
     found = which("yt-dlp")
     if found:
         return found, None
-    bindir = _interpreter_bin_dir()
-    for name in ("yt-dlp", "yt-dlp.exe"):
-        sibling = bindir / name
-        if sibling.is_file():
-            return str(sibling), None
+    for bindir in _candidate_bin_dirs():
+        for name in ("yt-dlp", "yt-dlp.exe"):
+            sibling = bindir / name
+            if sibling.is_file():
+                return str(sibling), None
     return None, (
         "yt-dlp was not found on PATH or next to this Python interpreter. "
         "Install yt-dlp yourself in this virtualenv, or on PATH, and retry, "
