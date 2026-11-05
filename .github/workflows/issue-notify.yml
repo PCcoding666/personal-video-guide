@@ -1,0 +1,75 @@
+name: Notify new issue
+
+# 新 issue 打开时通知 Grok Bot。不 checkout，不跑第三方 action，不执行 issue 正文。
+# URL 与 Authorization 头只来自 secrets，不入库、不打印。
+# 不改 CI / 发布行为：本工作流只在 issues: opened 时运行。
+
+on:
+  issues:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  notify:
+    name: notify grok bot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: POST issue to webhook
+        shell: bash
+        env:
+          WEBHOOK_URL: ${{ secrets.GROKBOT_ISSUE_WEBHOOK_URL }}
+          WEBHOOK_AUTH: ${{ secrets.GROKBOT_ISSUE_WEBHOOK_AUTH }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          ISSUE_AUTHOR_TYPE: ${{ github.event.issue.user.type }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_IS_PULL_REQUEST: ${{ github.event.issue.pull_request != null }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ "${ISSUE_IS_PULL_REQUEST}" = "true" ]; then
+            echo "Skipping pull request."
+            exit 0
+          fi
+
+          author_suffix=""
+          if [ "${#ISSUE_AUTHOR}" -ge 5 ]; then
+            author_suffix="${ISSUE_AUTHOR: -5}"
+          fi
+          if [ "${ISSUE_AUTHOR_TYPE}" = "Bot" ] || [ "${author_suffix}" = "[bot]" ]; then
+            echo "Skipping bot-authored issue."
+            exit 0
+          fi
+
+          if [ -z "${WEBHOOK_URL}" ] || [ -z "${WEBHOOK_AUTH}" ]; then
+            echo "::warning::GROKBOT_ISSUE_WEBHOOK_URL or GROKBOT_ISSUE_WEBHOOK_AUTH is empty; skipping issue notification"
+            exit 0
+          fi
+
+          if ! [[ "${ISSUE_NUMBER}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Refusing to notify: issue number is not an integer"
+            exit 1
+          fi
+
+          payload="$(jq -nc \
+            --arg repo "${REPO}" \
+            --argjson number "${ISSUE_NUMBER}" \
+            --arg title "${ISSUE_TITLE}" \
+            --arg url "${ISSUE_URL}" \
+            --arg author "${ISSUE_AUTHOR}" \
+            '{repo: $repo, number: $number, title: $title, url: $url, author: $author}')"
+
+          echo "Posting issue notification."
+          curl --fail-with-body --max-time 20 --retry 2 \
+            --silent --show-error \
+            --request POST \
+            --header "Authorization: ${WEBHOOK_AUTH}" \
+            --header "Content-Type: application/json" \
+            --data "${payload}" \
+            --output /tmp/grokbot-issue-webhook-body \
+            "${WEBHOOK_URL}"
+          echo "Issue notification delivered."
