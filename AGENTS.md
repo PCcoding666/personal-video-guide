@@ -11,11 +11,17 @@ Design: `docs/design.md`. Plan: `docs/plan.md`. Host findings: `docs/host-compat
 ## Layout
 
 - `src/video_guide/models.py` — pydantic models and `SCHEMA_VERSION`.
-- `src/video_guide/state.py` — `GuideStore`: atomic writes, JSONL logs, schema guard, injected clock. State lives outside the repository (default `~/.video-guide/`, configurable).
-- `src/video_guide/fetch.py` — the only network path: allow-listed HTTPS GET with a size cap.
+- `src/video_guide/state.py` — `GuideStore`: atomic writes, JSONL logs, caption cache, schema guard, injected clock. State lives outside the repository (default `~/.video-guide/`, configurable).
+- `src/video_guide/fetch.py` — allow-listed HTTPS GET with a size cap. YouTube captions do not go through this client.
 - `src/video_guide/sources.py` — channel / feed link normalization, `@handle` resolution.
-- `src/video_guide/feeds.py` — Atom/RSS parsing, de-duplication, 48 h overlap, per-source failure isolation.
-- `tests/` — offline tests; network via `httpx.MockTransport`, clock injected.
+- `src/video_guide/feeds.py` — Atom/RSS parsing, de-duplication, 48 h overlap, per-source failure isolation, Podcasting 2.0 transcript URLs.
+- `src/video_guide/captions.py` — VTT/SRT/json3 parsing, yt-dlp subtitle fetch, caption cache, podcast transcript fetch.
+- `src/video_guide/transcript.py` — chapter outline or 5-minute windows, and a bounded time-window read.
+- `src/video_guide/search.py` — BM25 lexical search over cues.
+- `src/video_guide/links.py` — `link.at` playback URLs and `h:m:s` clocks.
+- `src/video_guide/service.py` — shared entry point for the CLI.
+- `src/video_guide/cli.py` — `video-guide` typer app.
+- `tests/` — offline tests; network via `httpx.MockTransport`, yt-dlp via an injected runner, clock injected.
 
 ## Network and data boundaries
 

@@ -100,7 +100,7 @@
 
 步骤：
 
-- [ ] 先写失败测试：
+- [x] 先写失败测试：
   - VTT、SRT 和 JSON3 解析成带起止秒数的句子；
   - 自动字幕优先选 `en-orig` 原始轨，不选机器翻译的 `en`；人工字幕优先于自动字幕；
   - 字幕类型和语言如实标注；
@@ -109,24 +109,29 @@
   - `yt-dlp` 的原始 stderr 不进入返回值；临时目录在成功和失败后都被删除；
   - 缓存命中时不再调用 runner；
   - 字幕文本里的指令性内容原样作为数据返回。
-- [ ] 实现 `captions.py` 和 `podcast:transcript` 路径；更新 AGENTS.md 的 Layout 段。
-- [ ] 跑全部 gates。用本机 `yt-dlp` 加 Chrome cookie 手动取一期字幕核对一次（不进 pytest，不提交字幕内容）。
-- [ ] 测试通过后提交：`feat: fetch and parse timed captions via user-installed yt-dlp`。
+- [x] 实现 `captions.py` 和 `podcast:transcript` 路径；更新 AGENTS.md 的 Layout 段。播客转录的 CLI 入口还没接上：RSS 会记下 `podcast:transcript` URL，`load_podcast_transcript` 能拉取并解析，`video-guide transcript get` 目前只接受 YouTube URL。
+- [x] 离线 gates（`ruff format --check`、`ruff check`、`mypy src`、`pytest`、`git diff --check`）通过。
+- [ ] 用本机 `yt-dlp` 加 Chrome cookie 手动取一期字幕核对一次（不进 pytest，不提交字幕内容）。这次没有在带已登录浏览器的机器上重跑。
+- [x] 测试通过后提交：`feat: fetch and parse timed captions via user-installed yt-dlp`。
 
 ## Task 5：大纲、读取、检索与链接
 
 **Files:** `transcript.py`、`search.py`、`links.py`、`tests/test_transcript.py`、`tests/test_search.py`。
 
-- [ ] 先写失败测试：
+- [x] 先写失败测试：
   - 从简介解析章节（`00:00 Intro` 这类格式）；没有章节时按 5 分钟切窗；
   - `read` 按区间返回句子，超过 8,000 字符时截断并标注；
   - BM25 对多个查询短语合并打分，排序稳定；
   - 无命中返回空列表和覆盖范围；
   - `link.at` 提前 5 秒、不小于 0，生成 `youtube.com/watch?v=…&t=…s`；非 http(s) 链接拒绝。
-- [ ] 实现。检索只用标准库，不引入新依赖。
-- [ ] 测试通过后提交：`feat(guide): outline, read, search and link transcripts`。
+- [x] 实现。检索只用标准库，不引入新依赖。
+- [x] 测试通过后提交：`feat(guide): outline, read, search and link transcripts`。
+
+观看循环的 CLI（`transcript get` / `read` / `outline`、`search`、`link`、`profile`）随上面两项一起落地，走 `service.py`。Task 6 里 MCP server 仍未做。
 
 ## Task 6：服务层、CLI 与 MCP server
+
+观看循环用到的服务层和 CLI 已在 Task 4/5 完成。下面未勾的项仍然待做，主要是 MCP server、`guide` extra，以及和 `digest.record` 连起来的回归。
 
 **Files:** `service.py`、`cli.py`、`mcp_server.py`、`pyproject.toml`、`tests/test_cli.py`、`tests/test_mcp.py`。
 

@@ -52,20 +52,78 @@ Full design: [docs/design.md](docs/design.md). Build plan:
 
 ## Status
 
-Early. The state store and feed discovery are implemented and tested offline;
-caption fetching, transcript search, the CLI/MCP surface and the Skill are next.
-See [docs/plan.md](docs/plan.md) for the task list and
-[docs/host-compatibility.md](docs/host-compatibility.md) for what has been
-verified against a real host.
+The watching loop is in place and tested offline: give the CLI a YouTube URL,
+it fetches captions, searches them, and returns a playback link. The stdio MCP
+server and the Skill are still to come. See [docs/plan.md](docs/plan.md) for the
+task list and [docs/host-compatibility.md](docs/host-compatibility.md) for what
+has been verified against a real host.
 
 | Area | State |
 | --- | --- |
-| Profile, sources, seen / feedback logs (atomic writes, schema-versioned) | done |
-| Channel link → feed; `@handle` resolution; RSS discovery with 48 h overlap and per-source isolation | done |
-| Caption fetch and cache | planned |
-| Transcript outline, read, lexical search, `link.at` | planned |
-| CLI + stdio MCP server | planned |
+| Profile, seen / feedback logs (atomic writes, schema-versioned) | done |
+| `sources.json` persistence | not built yet. `GuideStore` does not write a source list |
+| Channel link → feed; `@handle` resolution; RSS discovery with 48 h overlap and per-source isolation | done. `@handle` resolution still takes the first `channelId` on the page |
+| Caption fetch and cache (manual, then automatic with `en-orig` preferred, then a podcast transcript URL) | done. YouTube goes through a yt-dlp you install; cookies stay off unless the profile names a browser |
+| Transcript outline, read, lexical search, `link.at` | done |
+| CLI (`video-guide`) | done for `transcript get` / `read` / `outline`, `search`, `link`, and `profile` |
+| stdio MCP server | planned |
 | `SKILL.md` and host install notes | planned |
+
+## Watching loop
+
+Install the package, and install `yt-dlp` yourself. This package does not
+install, bundle, or pin it.
+
+```bash
+python -m pip install -e .
+video-guide transcript get 'https://www.youtube.com/watch?v=VIDEO_ID'
+video-guide search 'https://www.youtube.com/watch?v=VIDEO_ID' 'a phrase you remember'
+video-guide link 'https://www.youtube.com/watch?v=VIDEO_ID' 754
+```
+
+`transcript get` prints the caption language, the kind (`manual`, `auto`, or
+`podcast`), the duration, and how many cues were stored. The cue text stays in
+the local cache (`~/.video-guide/cache/captions/`, or `$VIDSNAP_GUIDE_HOME`).
+`search` prints each matching cue, the cue before it, the cue after it, and a
+`https://www.youtube.com/watch?v=…&t=…s` URL. `link` builds that URL from the
+second you pass.
+
+Playback starts 5 seconds before that moment, floored to a whole second, and
+never before zero. `timestamp` is the clock for the moment you asked about.
+`playback_timestamp` is the clock for the `t=` value. Both come from the tool.
+
+YouTube often refuses caption requests that carry no cookies. Cookies stay off
+until you opt in. The package never reads or stores them; yt-dlp reads them
+from the browser you name:
+
+```bash
+video-guide profile set --cookies-from-browser chrome
+video-guide profile set --clear-cookies
+video-guide profile set --ytdlp-path /path/to/yt-dlp
+```
+
+Allowed browser names are `chrome`, `firefox`, `safari`, `edge`, and `brave`.
+A missing yt-dlp returns `ytdlp_missing`. A YouTube bot check returns
+`bot_check`; with cookies still off, the hint is `no_cookies`. A video with no
+caption track returns `no_captions`. The tool does not invent a quote or a
+timestamp when that happens.
+
+`transcript outline` prints chapters parsed from description lines such as
+`00:00 Intro` when a description is passed with `--description`. Otherwise it
+slices the captions into 5-minute windows. `transcript read START END` prints
+the cues in that range, up to 8,000 characters.
+
+Podcast RSS items keep a Podcasting 2.0 `podcast:transcript` URL when the feed
+publishes one. Loading that file is `load_podcast_transcript` in
+`video_guide.captions`, through the same allow-listed HTTPS GET as other
+feeds. The CLI commands above take a YouTube URL.
+
+## Known gaps
+
+- `sources.json` is not written. A source list does not survive a restart.
+- Feed responses larger than 5 MB are refused (`DEFAULT_MAX_BYTES` in `fetch.py`), which rejects some large podcast feeds.
+- `@handle` resolution uses the first `channelId` on the channel page, so a page that mentions another channel first can resolve to the wrong feed.
+- The stdio MCP server, the Skill, and a manual check with a signed-in browser's cookies are still open. ASR is out of scope.
 
 ## Development
 

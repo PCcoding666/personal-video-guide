@@ -13,7 +13,11 @@ keywords = ["youtube", "captions", "mcp", "agent-skill", "video", "local-first"]
 dependencies = [
     "httpx>=0.27,<1",
     "pydantic>=2.7,<3",
+    "typer>=0.12,<1",
 ]
+
+[project.scripts]
+video-guide = "video_guide.cli:main"
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.0,<2"]
