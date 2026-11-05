@@ -45,7 +45,7 @@ ALLOWED_FLAGS = {
     "-o",
     "--cookies-from-browser",
     "--cookies",
-    "--list-subs",
+    "-J",
     "--ignore-no-formats-error",
 }
 FORBIDDEN_FLAGS = (
@@ -87,6 +87,8 @@ def _runner(
     exc: BaseException | None = None,
     seen: dict[str, object] | None = None,
     listing: str = _DEFAULT_LISTING,
+    info_title: str = "An English talk",
+    info_description: str = "",
 ) -> Callable[[list[str], float], CompletedRun]:
     def runner(argv: list[str], timeout: float) -> CompletedRun:
         if seen is not None:
@@ -103,12 +105,26 @@ def _runner(
             seen["dir"] = directory
         if exc is not None:
             raise exc
-        if "--list-subs" in argv:
+        if "-J" in argv:
             if returncode != 0:
                 return CompletedRun(returncode=returncode, stdout="", stderr=stderr)
-            return CompletedRun(returncode=0, stdout=listing, stderr="")
+            manual, automatic = parse_subtitle_listing(listing)
+            payload = {
+                "title": info_title,
+                "description": info_description,
+                "language": "bn",
+                "subtitles": {code: [{"ext": "vtt"}] for code in manual},
+                "automatic_captions": {code: [{"ext": "json3"}] for code in automatic},
+            }
+            return CompletedRun(returncode=0, stdout=json.dumps(payload), stderr="")
+        requested: set[str] | None = None
+        if "--sub-langs" in argv:
+            requested = set(argv[argv.index("--sub-langs") + 1].split(","))
         written: list[Path] = []
         for name, content in files.items():
+            lang = name.split(".", 1)[1].rsplit(".", 1)[0] if name.count(".") >= 2 else ""
+            if requested is not None and lang not in requested:
+                continue
             path = directory / name
             path.write_text(content, encoding="utf-8")
             written.append(path)
@@ -366,7 +382,7 @@ def test_argv_is_subtitle_only_and_url_is_canonical(tmp_path: Path) -> None:
     assert set(flags) <= ALLOWED_FLAGS
     assert "--cookies-from-browser" not in argv
     assert "--cookies" not in argv
-    assert "--list-subs" not in argv
+    assert "-J" not in argv
     assert "--ignore-no-formats-error" in argv
     assert argv[argv.index("--sub-format") + 1] == SUB_FORMAT
     assert argv[argv.index("--sub-langs") + 1] == "en"
@@ -374,7 +390,7 @@ def test_argv_is_subtitle_only_and_url_is_canonical(tmp_path: Path) -> None:
     assert argv[-1] == URL
     argvs = seen["argvs"]
     assert isinstance(argvs, list)
-    assert "--list-subs" in argvs[0]
+    assert "-J" in argvs[0]
     assert "--write-subs" not in argvs[0]
     assert "--ignore-no-formats-error" in argvs[0]
     assert seen["timeout"] == 7
@@ -657,10 +673,11 @@ if "--skip-download" not in args or "--ignore-no-formats-error" not in args:
 if "--cookies-from-browser" in args:
     sys.stderr.write("unexpected argv\\n")
     raise SystemExit(2)
-if "--list-subs" in args:
-    print("[info] Available subtitles for abcdefghijk:")
-    print("Language Formats")
-    print("en       vtt, json3")
+if "-J" in args:
+    print(
+        '{"title":"An English talk","description":"","language":"bn",'
+        '"subtitles":{"en":[{"ext":"vtt"}]},"automatic_captions":{}}'
+    )
     raise SystemExit(0)
 out = args[args.index("-o") + 1]
 directory = pathlib.Path(out).parent
@@ -821,17 +838,20 @@ def test_acquire_does_not_bypass_a_bot_check(tmp_path: Path) -> None:
     assert outcome.failure.hint == "no_cookies"
 
 
-def test_choose_subtitle_languages_stays_at_one_or_two_tracks() -> None:
-    assert choose_subtitle_languages(["en"], ["en-orig", "en", "zh-Hans"]) == ["en"]
-    assert choose_subtitle_languages([], ["en-orig", "en", "zh-Hans"]) == ["en-orig"]
-    assert choose_subtitle_languages([], ["ja-orig", "en"], ("en",)) == ["ja-orig", "en"]
-    assert choose_subtitle_languages(["en"], ["en-orig"], ("en",)) == ["en"]
-    assert choose_subtitle_languages(["en"], ["en-orig", "zh-Hans", "zh-Hant"], ("zh",)) == [
-        "en",
-        "zh-Hans",
+def test_choose_subtitle_languages_picks_one_track() -> None:
+    english = "An English talk"
+    assert choose_subtitle_languages(["en"], ["en-orig", "en", "zh-Hans"], title=english) == ["en"]
+    assert choose_subtitle_languages([], ["en-orig", "en", "zh-Hans"], title=english) == ["en-orig"]
+    assert choose_subtitle_languages([], ["ja-orig", "en"], ("en",), title="日本語の話") == ["en"]
+    assert choose_subtitle_languages(["en"], ["en-orig"], ("en",), title=english) == ["en"]
+    assert choose_subtitle_languages(
+        ["en"], ["en-orig", "zh-Hans", "zh-Hant"], ("zh",), title=english
+    ) == ["zh-Hans"]
+    assert choose_subtitle_languages(["fr", "en"], [], ("en",), title=english) == ["en"]
+    assert choose_subtitle_languages([], [], ("en",), title=english) == []
+    assert choose_subtitle_languages([], ["ar-orig", "en-orig", "bn-orig"], title="عشرة عادات") == [
+        "ar-orig"
     ]
-    assert choose_subtitle_languages(["fr", "en"], [], ("en",)) == ["en"]
-    assert choose_subtitle_languages([], [], ("en",)) == []
 
 
 def test_parse_subtitle_listing_splits_manual_and_automatic() -> None:
@@ -875,9 +895,10 @@ zh-Hant  vtt, json3
     )
     argv = seen["argv"]
     assert isinstance(argv, list)
-    assert argv[argv.index("--sub-langs") + 1] == "en,zh-Hans"
+    assert argv[argv.index("--sub-langs") + 1] == "zh-Hans"
     assert outcome.transcript is not None
-    assert outcome.transcript.language == "en"
+    assert outcome.transcript.language == "zh-Hans"
+    assert outcome.transcript.sentences[0].text == "中文"
 
 
 def test_subtitle_429_retries_then_succeeds(tmp_path: Path) -> None:
@@ -885,8 +906,21 @@ def test_subtitle_429_retries_then_succeeds(tmp_path: Path) -> None:
     sleeps: list[float] = []
 
     def runner(argv: list[str], timeout: float) -> CompletedRun:
-        if "--list-subs" in argv:
-            return CompletedRun(0, _DEFAULT_LISTING, "")
+        if "-J" in argv:
+            manual, automatic = parse_subtitle_listing(_DEFAULT_LISTING)
+            return CompletedRun(
+                0,
+                json.dumps(
+                    {
+                        "title": "An English talk",
+                        "description": "",
+                        "language": "bn",
+                        "subtitles": {code: [{"ext": "vtt"}] for code in manual},
+                        "automatic_captions": {code: [{"ext": "json3"}] for code in automatic},
+                    }
+                ),
+                "",
+            )
         downloads["n"] += 1
         if downloads["n"] < SUBTITLE_ATTEMPTS:
             return CompletedRun(1, "", "ERROR: HTTP Error 429: Too Many Requests")
@@ -922,8 +956,21 @@ def test_usable_caption_is_kept_when_stderr_also_says_429(tmp_path: Path) -> Non
     sleeps: list[float] = []
 
     def runner(argv: list[str], timeout: float) -> CompletedRun:
-        if "--list-subs" in argv:
-            return CompletedRun(0, _DEFAULT_LISTING, "")
+        if "-J" in argv:
+            manual, automatic = parse_subtitle_listing(_DEFAULT_LISTING)
+            return CompletedRun(
+                0,
+                json.dumps(
+                    {
+                        "title": "An English talk",
+                        "description": "",
+                        "language": "bn",
+                        "subtitles": {code: [{"ext": "vtt"}] for code in manual},
+                        "automatic_captions": {code: [{"ext": "json3"}] for code in automatic},
+                    }
+                ),
+                "",
+            )
         directory = Path(argv[argv.index("-o") + 1]).parent
         path = directory / f"{VIDEO_ID}.en.vtt"
         path.write_text(_vtt("00:00:01.000", "00:00:02.000", "kept"), encoding="utf-8")
@@ -975,6 +1022,117 @@ def _point_interpreter(
         return None
 
     monkeypatch.setattr("video_guide.captions.sysconfig.get_path", get_path)
+
+
+_MULTI_ORIG = """[info] Available automatic captions for u-8KpXcPYCw:
+Language Name Formats
+bn-orig Bangla vtt, json3
+nl-orig Dutch vtt, json3
+en-orig English vtt, json3
+fr-orig French vtt, json3
+de-orig German vtt, json3
+iw-orig Hebrew vtt, json3
+hi-orig Hindi vtt, json3
+ar-orig Arabic vtt, json3
+en English vtt, json3
+"""
+_ENGLISH_TITLE = "10 Habits PhDs Must Unlearn To Build a Startup | Startup School"
+
+
+def test_multi_orig_listing_selects_en_orig_for_a_latin_title(tmp_path: Path) -> None:
+    files = {
+        f"{VIDEO_ID}.en-orig.vtt": _vtt(
+            "00:00:01.000", "00:00:04.000", "PhDs must unlearn these startup habits"
+        ),
+        f"{VIDEO_ID}.bn-orig.vtt": _vtt("00:00:01.000", "00:00:04.000", "আমরা একটি স্টার্টআপ"),
+    }
+    seen: dict[str, object] = {}
+    _store, outcome = _fetch(
+        tmp_path,
+        _runner(
+            files,
+            listing=_MULTI_ORIG,
+            info_title=_ENGLISH_TITLE,
+            stdout=_auto([f"{VIDEO_ID}.en-orig.vtt", f"{VIDEO_ID}.bn-orig.vtt"]),
+            seen=seen,
+        ),
+    )
+    argvs = seen["argvs"]
+    assert isinstance(argvs, list)
+    downloads = [argv for argv in argvs if isinstance(argv, list) and "--sub-langs" in argv]
+    assert len(downloads) == 1
+    assert downloads[0][downloads[0].index("--sub-langs") + 1] == "en-orig"
+    assert outcome.transcript is not None
+    assert outcome.transcript.language == "en-orig"
+    assert outcome.transcript.kind is CaptionKind.AUTO
+    assert "startup" in outcome.transcript.sentences[0].text
+
+
+def test_caption_language_overrides_the_title_script(tmp_path: Path) -> None:
+    files = {
+        f"{VIDEO_ID}.bn-orig.vtt": _vtt("00:00:01.000", "00:00:03.000", "বাংলা কথা"),
+    }
+    seen: dict[str, object] = {}
+    _store, outcome = _fetch(
+        tmp_path,
+        _runner(
+            files,
+            listing=_MULTI_ORIG,
+            info_title=_ENGLISH_TITLE,
+            stdout=_auto([f"{VIDEO_ID}.bn-orig.vtt"]),
+            seen=seen,
+        ),
+        profile=Profile(preferred_caption_languages=("bn",)),
+    )
+    argv = seen["argv"]
+    assert isinstance(argv, list)
+    assert argv[argv.index("--sub-langs") + 1] == "bn-orig"
+    assert outcome.transcript is not None
+    assert outcome.transcript.language == "bn-orig"
+    assert outcome.transcript.kind is CaptionKind.AUTO
+    assert outcome.transcript.sentences[0].text == "বাংলা কথা"
+
+
+def test_wrong_script_triggers_one_alternate_download(tmp_path: Path) -> None:
+    downloads: list[str] = []
+
+    def runner(argv: list[str], timeout: float) -> CompletedRun:
+        if "-J" in argv:
+            return CompletedRun(
+                0,
+                json.dumps(
+                    {
+                        "title": _ENGLISH_TITLE,
+                        "description": "Startup School",
+                        "language": "bn",
+                        "subtitles": {},
+                        "automatic_captions": {
+                            "bn-orig": [{"ext": "vtt"}],
+                            "en-orig": [{"ext": "vtt"}],
+                            "en": [{"ext": "vtt"}],
+                        },
+                    }
+                ),
+                "",
+            )
+        langs = argv[argv.index("--sub-langs") + 1]
+        downloads.append(langs)
+        directory = Path(argv[argv.index("-o") + 1]).parent
+        if langs == "en-orig":
+            path = directory / f"{VIDEO_ID}.en-orig.vtt"
+            text = "আমরা স্টার্টআপ গড়ি"
+        else:
+            path = directory / f"{VIDEO_ID}.en.vtt"
+            text = "PhDs must unlearn these startup habits"
+        path.write_text(_vtt("00:00:01.000", "00:00:04.000", text), encoding="utf-8")
+        return CompletedRun(0, f"Writing video automatic captions to: {path}\n", "")
+
+    _store, outcome = _fetch(tmp_path, runner)
+    assert downloads == ["en-orig", "en"]
+    assert outcome.transcript is not None
+    assert outcome.transcript.language == "en"
+    assert outcome.transcript.kind is CaptionKind.AUTO
+    assert "startup" in outcome.transcript.sentences[0].text
 
 
 def test_ytdlp_beside_a_symlinked_interpreter_is_used(

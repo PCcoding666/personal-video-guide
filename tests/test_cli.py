@@ -43,10 +43,11 @@ if any(arg in forbidden for arg in args) or "--skip-download" not in args:
     raise SystemExit(2)
 if "--ignore-no-formats-error" not in args or "--cookies-from-browser" in args:
     raise SystemExit(2)
-if "--list-subs" in args:
-    print("[info] Available subtitles for abcdefghijk:")
-    print("Language Formats")
-    print("en       vtt, json3")
+if "-J" in args:
+    print(
+        '{"title":"We shipped it after a year","description":"","language":"bn",'
+        '"subtitles":{"en":[{"ext":"vtt"}]},"automatic_captions":{}}'
+    )
     raise SystemExit(0)
 log = os.environ.get("GUIDE_FAKE_LOG")
 if log:

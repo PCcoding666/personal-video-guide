@@ -7,12 +7,15 @@ removed before this function returns. ``--cookies-from-browser`` is added only
 when the profile names a browser. Cookie contents are never read, stored, or
 logged, and yt-dlp's own stdout/stderr never leave this module.
 
-Track choice, best first: the original-language manual captions, otherwise the
-``*-orig`` automatic track, plus at most one preferred language from the
-profile. Available languages come from ``--list-subs`` (no timedtext download);
-only those codes are then requested. A Podcasting 2.0 transcript URL is next
-when the caller has one. Caption text is returned as data, including text that
-looks like an instruction.
+YouTube now labels every auto-dub ``*-orig``, so the first such code is not
+the spoken language, and yt-dlp's top-level ``language`` field follows the
+account rather than the audio. The probe is one ``-J`` metadata dump (no
+timedtext). The download is a single language code: the profile's caption
+language when that track exists, otherwise the track whose script matches the
+title (Latin titles use ``en-orig`` / manual ``en``). If that file's script
+disagrees with the title, one alternate track is tried. A Podcasting 2.0
+transcript URL is next when the caller has one. Caption text is returned as
+data, including text that looks like an instruction.
 """
 
 from __future__ import annotations
@@ -369,29 +372,63 @@ def fetch_youtube_captions(
             return _fail("ytdlp_missing", missing or "yt-dlp was not found.")
         except OSError:
             return _fail("ytdlp_failed", "yt-dlp could not be started.")
-        manual, automatic = parse_subtitle_listing(f"{listed.stdout}\n{listed.stderr}")
-        languages = choose_subtitle_languages(manual, automatic, active.preferred_caption_languages)
+        manual, automatic, title, description = parse_caption_catalog(
+            f"{listed.stdout}\n{listed.stderr}"
+        )
+        languages = choose_subtitle_languages(
+            manual,
+            automatic,
+            active.preferred_caption_languages,
+            title=title,
+            description=description,
+        )
         if not languages:
             outcome = _interpret(listed, directory, video_id, cookies_enabled=cookies_enabled)
         else:
-            try:
-                completed = _invoke_with_retry(
-                    _build_download_argv(
-                        executable, video_id, template, browser, cookies_file, languages
-                    ),
-                    directory,
-                    video_id,
-                    run,
-                    timeout,
-                    sleeper,
+            outcome = _download_codes(
+                languages,
+                directory,
+                video_id,
+                executable,
+                template,
+                browser,
+                cookies_file,
+                run,
+                timeout,
+                sleeper,
+                cookies_enabled,
+            )
+            if outcome.transcript is not None and _should_retry_for_script(
+                outcome.transcript,
+                active.preferred_caption_languages,
+                manual,
+                automatic,
+                title,
+                description,
+            ):
+                alternate = choose_subtitle_languages(
+                    manual,
+                    automatic,
+                    (),
+                    title=title,
+                    description=description,
+                    exclude=(outcome.transcript.language,),
                 )
-            except (RunnerTimeout, subprocess.TimeoutExpired):
-                return _fail("timeout", "yt-dlp timed out before captions were written.")
-            except FileNotFoundError:
-                return _fail("ytdlp_missing", missing or "yt-dlp was not found.")
-            except OSError:
-                return _fail("ytdlp_failed", "yt-dlp could not be started.")
-            outcome = _interpret(completed, directory, video_id, cookies_enabled=cookies_enabled)
+                if alternate and alternate != list(languages):
+                    _clear_subtitle_files(directory)
+                    outcome = _download_codes(
+                        alternate,
+                        directory,
+                        video_id,
+                        executable,
+                        template,
+                        browser,
+                        cookies_file,
+                        run,
+                        timeout,
+                        sleeper,
+                        cookies_enabled,
+                    )
     outcome = _without_cookies_path(outcome, cookies_file)
     if outcome.transcript is not None:
         store.save_caption(outcome.transcript)
@@ -518,17 +555,52 @@ def _build_list_argv(
     browser: str | None,
     cookies_file: str | None,
 ) -> list[str]:
-    """Metadata only. ``--list-subs`` does not download timedtext tracks."""
+    """One metadata dump. ``-J`` does not download timedtext tracks.
+
+    The top-level ``language`` field in that JSON is ignored: with cookies it
+    follows the account, not the spoken audio.
+    """
     argv = [
         executable,
+        "-J",
         "--skip-download",
-        "--list-subs",
         "--ignore-no-formats-error",
         "--no-playlist",
         "-o",
         template,
     ]
     return _with_cookies(argv, browser, cookies_file, video_id)
+
+
+def _download_codes(
+    languages: Sequence[str],
+    directory: Path,
+    video_id: str,
+    executable: str,
+    template: str,
+    browser: str | None,
+    cookies_file: str | None,
+    runner: Runner,
+    timeout: float,
+    sleeper: Sleeper,
+    cookies_enabled: bool,
+) -> CaptionOutcome:
+    try:
+        completed = _invoke_with_retry(
+            _build_download_argv(executable, video_id, template, browser, cookies_file, languages),
+            directory,
+            video_id,
+            runner,
+            timeout,
+            sleeper,
+        )
+    except (RunnerTimeout, subprocess.TimeoutExpired):
+        return _fail("timeout", "yt-dlp timed out before captions were written.")
+    except FileNotFoundError:
+        return _fail("ytdlp_missing", "yt-dlp was not found.")
+    except OSError:
+        return _fail("ytdlp_failed", "yt-dlp could not be started.")
+    return _interpret(completed, directory, video_id, cookies_enabled=cookies_enabled)
 
 
 def _build_download_argv(
@@ -574,7 +646,7 @@ def parse_subtitle_listing(text: str) -> tuple[list[str], list[str]]:
         if section is None or not line or lowered.startswith("language"):
             continue
         token = line.split()[0]
-        if not _LANG_CODE.fullmatch(token) or token.lower() == "live_chat":
+        if not _valid_caption_code(token):
             continue
         bucket = automatic if section == "auto" else manual
         if token not in bucket:
@@ -582,39 +654,300 @@ def parse_subtitle_listing(text: str) -> tuple[list[str], list[str]]:
     return manual, automatic
 
 
+def parse_caption_catalog(text: str) -> tuple[list[str], list[str], str, str]:
+    """Return manual codes, automatic codes, title, and description.
+
+    Prefers a yt-dlp ``-J`` object. The top-level ``language`` field is not
+    read: with cookies it follows the signed-in account. ``--list-subs`` text
+    is accepted when there is no JSON object; that form has no title.
+    """
+    data = _extract_json_object(text)
+    if data is not None and any(
+        key in data for key in ("subtitles", "automatic_captions", "title")
+    ):
+        manual = _caption_codes(data.get("subtitles"))
+        automatic = _caption_codes(data.get("automatic_captions"))
+        title_value = data.get("title")
+        description_value = data.get("description")
+        title = title_value if isinstance(title_value, str) else ""
+        description = description_value if isinstance(description_value, str) else ""
+        return manual, automatic, title, description
+    manual, automatic = parse_subtitle_listing(text)
+    return manual, automatic, "", ""
+
+
 def choose_subtitle_languages(
     manual: Sequence[str],
     automatic: Sequence[str],
     preferred: Sequence[str] = (),
+    *,
+    title: str = "",
+    description: str = "",
+    exclude: Sequence[str] = (),
 ) -> list[str]:
-    """Original track, plus at most one preferred language that is a different language.
+    """One language code, so the timedtext download stays a single request.
 
-    Manual captions for the original language win over the ``*-orig`` automatic
-    track. Preferred codes are tried in order; the first available one that is
-    not the same language as the original is the only extra download.
+    A profile caption language wins whenever that track exists (manual, then
+    ``*-orig``, then a plain automatic code). Otherwise the title and
+    description pick the spoken track. Many ``*-orig`` codes are auto-dubs, so
+    the first one alphabetically is not used. A Latin-script title selects
+    manual ``en`` or ``en-orig`` when either exists.
     """
-    orig_autos = sorted(code for code in automatic if code.lower().endswith("-orig"))
-    chosen: list[str] = []
-    if orig_autos:
-        base = orig_autos[0][: -len("-orig")]
-        chosen.append(_match_lang(manual, base) or orig_autos[0])
-    elif manual:
-        preferred_manual = _first_match(manual, preferred)
-        chosen.append(preferred_manual or min(manual, key=str.lower))
-    elif automatic:
-        plain = [code for code in automatic if not code.lower().endswith("-orig")]
-        chosen.append(_first_match(plain, preferred) or min(automatic, key=str.lower))
-    else:
+    skipped = {code.lower() for code in exclude}
+    manuals = [code for code in manual if code.lower() not in skipped]
+    autos = [code for code in automatic if code.lower() not in skipped]
+    preferred_hit = _preferred_track(manuals, autos, preferred)
+    if preferred_hit is not None:
+        return [preferred_hit]
+    spoken = _guess_spoken(manuals, autos, title, description)
+    if spoken is None:
         return []
-    origin = chosen[0]
-    pool = list(manual) + [code for code in automatic if code not in manual]
-    for pref in preferred:
-        match = _match_lang(pool, pref)
-        if match is None or match in chosen or _same_language(match, origin):
+    return [spoken]
+
+
+def scripts_disagree(reference: str, caption_text: str) -> bool:
+    """True when the caption's letters are a different script from the title."""
+    left = dominant_script(reference)
+    right = dominant_script(caption_text)
+    if left is None or right is None:
+        return False
+    return left != right
+
+
+def dominant_script(text: str) -> str | None:
+    """The script of the letters in ``text``, or None when there are none.
+
+    Kana alongside Han is Japanese. Han alone is Chinese. Digits and
+    punctuation are ignored.
+    """
+    counts: dict[str, int] = {}
+    for char in text:
+        script = _char_script(char)
+        if script is None:
             continue
-        chosen.append(match)
-        break
-    return chosen[:2]
+        counts[script] = counts.get(script, 0) + 1
+    if not counts:
+        return None
+    if counts.get("kana", 0) and counts.get("han", 0):
+        return "japanese"
+    if counts.get("kana", 0) and counts.get("han", 0) == 0:
+        return "japanese"
+    return max(counts, key=lambda name: (counts[name], name))
+
+
+def _valid_caption_code(token: str) -> bool:
+    return bool(_LANG_CODE.fullmatch(token)) and token.lower() != "live_chat"
+
+
+def _caption_codes(value: object) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    codes: list[str] = []
+    for key in value:
+        if isinstance(key, str) and _valid_caption_code(key) and key not in codes:
+            codes.append(key)
+    return codes
+
+
+def _extract_json_object(text: str) -> dict[str, object] | None:
+    start = text.find("{")
+    if start < 0:
+        return None
+    try:
+        data, _end = json.JSONDecoder().raw_decode(text[start:])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _preferred_track(
+    manual: Sequence[str], automatic: Sequence[str], preferred: Sequence[str]
+) -> str | None:
+    plains = [code for code in automatic if not code.lower().endswith("-orig")]
+    for pref in preferred:
+        manual_hit = _match_lang(manual, pref)
+        if manual_hit is not None:
+            return manual_hit
+        orig = _orig_code(automatic, pref)
+        if orig is not None:
+            return orig
+        plain = _match_lang(plains, pref)
+        if plain is not None:
+            return plain
+    return None
+
+
+def _orig_code(automatic: Sequence[str], pref: str) -> str | None:
+    pref_l = pref.lower()
+    exact = [code for code in automatic if code.lower() == f"{pref_l}-orig"]
+    if exact:
+        return exact[0]
+    prefixed = [
+        code
+        for code in automatic
+        if code.lower().endswith("-orig")
+        and code.lower().removesuffix("-orig").startswith(pref_l + "-")
+    ]
+    if not prefixed:
+        return None
+    return min(prefixed, key=lambda code: (len(code), code.lower()))
+
+
+def _guess_spoken(
+    manual: Sequence[str], automatic: Sequence[str], title: str, description: str
+) -> str | None:
+    script = dominant_script(f"{title}\n{description}")
+    origs = [code for code in automatic if code.lower().endswith("-orig")]
+    plains = [code for code in automatic if not code.lower().endswith("-orig")]
+    if script is None:
+        manual_en = _match_lang(manual, "en")
+        en_orig = _orig_code(automatic, "en")
+        if manual_en is not None or en_orig is not None:
+            return manual_en or en_orig
+        if len(origs) == 1:
+            return origs[0]
+        if len(manual) == 1:
+            return manual[0]
+        return None
+    if script == "latin":
+        manual_en = _match_lang(manual, "en")
+        if manual_en is not None:
+            return manual_en
+        en_orig = _orig_code(automatic, "en")
+        if en_orig is not None:
+            return en_orig
+        plain_en = _match_lang(plains, "en")
+        if plain_en is not None:
+            return plain_en
+        latin_origs = [code for code in origs if _code_script(code) == "latin"]
+        if len(latin_origs) == 1:
+            return latin_origs[0]
+        if len(origs) == 1:
+            return origs[0]
+        return None
+    return _match_script(manual, origs, plains, script) or (origs[0] if len(origs) == 1 else None)
+
+
+def _match_script(
+    manual: Sequence[str], origs: Sequence[str], plains: Sequence[str], script: str
+) -> str | None:
+    order: tuple[str, ...]
+    if script == "han":
+        order = ("zh-Hans", "zh-Hant", "zh")
+    elif script == "japanese":
+        order = ("ja",)
+    else:
+        order = ()
+    for pref in order:
+        hit = _match_lang(manual, pref) or _orig_code(origs, pref) or _match_lang(plains, pref)
+        if hit is not None:
+            return hit
+    for pool in (manual, origs, plains):
+        matches = [code for code in pool if _code_script(code) == script]
+        if matches:
+            return min(matches, key=str.lower)
+    return None
+
+
+_BASE_SCRIPT = {
+    "en": "latin",
+    "fr": "latin",
+    "de": "latin",
+    "es": "latin",
+    "pt": "latin",
+    "nl": "latin",
+    "id": "latin",
+    "it": "latin",
+    "pl": "latin",
+    "vi": "latin",
+    "tr": "latin",
+    "sv": "latin",
+    "da": "latin",
+    "no": "latin",
+    "fi": "latin",
+    "ro": "latin",
+    "hu": "latin",
+    "cs": "latin",
+    "ar": "arabic",
+    "fa": "arabic",
+    "ur": "arabic",
+    "bn": "bengali",
+    "hi": "devanagari",
+    "mr": "devanagari",
+    "ne": "devanagari",
+    "iw": "hebrew",
+    "he": "hebrew",
+    "ko": "hangul",
+    "ja": "japanese",
+    "zh": "han",
+    "ru": "cyrillic",
+    "uk": "cyrillic",
+    "bg": "cyrillic",
+    "th": "thai",
+    "el": "greek",
+}
+
+
+def _code_script(code: str) -> str | None:
+    lowered = code.lower().removesuffix("-orig")
+    if lowered == "ja" or lowered.startswith("ja-"):
+        return "japanese"
+    if lowered == "zh" or lowered.startswith("zh-"):
+        return "han"
+    return _BASE_SCRIPT.get(lowered.split("-", 1)[0])
+
+
+def _char_script(char: str) -> str | None:
+    codepoint = ord(char)
+    if "A" <= char <= "Z" or "a" <= char <= "z" or 0x00C0 <= codepoint <= 0x024F:
+        return "latin"
+    if 0x0600 <= codepoint <= 0x06FF or 0x0750 <= codepoint <= 0x077F:
+        return "arabic"
+    if 0x0980 <= codepoint <= 0x09FF:
+        return "bengali"
+    if 0x0900 <= codepoint <= 0x097F:
+        return "devanagari"
+    if 0x0590 <= codepoint <= 0x05FF:
+        return "hebrew"
+    if 0xAC00 <= codepoint <= 0xD7AF or 0x1100 <= codepoint <= 0x11FF:
+        return "hangul"
+    if 0x3040 <= codepoint <= 0x30FF:
+        return "kana"
+    if 0x4E00 <= codepoint <= 0x9FFF:
+        return "han"
+    if 0x0400 <= codepoint <= 0x04FF:
+        return "cyrillic"
+    if 0x0E00 <= codepoint <= 0x0E7F:
+        return "thai"
+    if 0x0370 <= codepoint <= 0x03FF and not (0x0370 <= codepoint <= 0x037F):
+        return "greek"
+    return None
+
+
+def _should_retry_for_script(
+    transcript: Transcript,
+    preferred: Sequence[str],
+    manual: Sequence[str],
+    automatic: Sequence[str],
+    title: str,
+    description: str,
+) -> bool:
+    if _preferred_track(manual, automatic, preferred) is not None:
+        return False
+    sample = " ".join(sentence.text for sentence in transcript.sentences[:12])
+    if not scripts_disagree(f"{title}\n{description}", sample):
+        return False
+    alternate = choose_subtitle_languages(
+        manual,
+        automatic,
+        (),
+        title=title,
+        description=description,
+        exclude=(transcript.language,),
+    )
+    return bool(alternate) and alternate != [transcript.language]
 
 
 def _match_lang(available: Sequence[str], wanted: str) -> str | None:

@@ -116,10 +116,14 @@ Allowed browser names are `chrome`, `firefox`, `safari`, `edge`, and `brave`.
 When both a browser and a cookies file are set, the file is what yt-dlp
 receives. `profile show` prints the path you saved; caption commands do not.
 
-Caption fetch lists the available tracks, then downloads at most two: the
-original language (manual if that track exists, otherwise the `*-orig`
-automatic track) and, if you set one, a single preferred language such as
-`zh-Hans`. It does not request every auto-translated language.
+Caption fetch reads the track list, then downloads one language. Many
+`*-orig` codes are auto-dubs, and yt-dlp's language field can follow the
+signed-in account, so neither is treated as the spoken language. A Latin-script
+title selects manual `en` or `en-orig` when that track exists. Set a caption
+language when you want a specific track instead; that choice wins whenever the
+video has it. If the downloaded words are in a different script from the title,
+one alternate track is tried. The saved `kind` and `language` are the file
+that was actually written.
 
 ```bash
 video-guide profile set --caption-language zh-Hans
