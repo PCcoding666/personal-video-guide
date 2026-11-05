@@ -199,6 +199,10 @@ class Transcript(GuideModel):
     kind: CaptionKind
     duration: float = Field(ge=0)
     sentences: tuple[Sentence, ...] = ()
+    # Filled from the yt-dlp metadata dump when captions are fetched.
+    # Outline uses the description for chapter lines when the caller omits one.
+    title: str = Field(default="", max_length=1_024)
+    description: str = Field(default="", max_length=16_000)
 
 
 class Window(GuideModel):

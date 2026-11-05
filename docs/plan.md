@@ -135,27 +135,27 @@
 
 **Files:** `service.py`、`cli.py`、`mcp_server.py`、`pyproject.toml`、`tests/test_cli.py`、`tests/test_mcp.py`。
 
-- [ ] 先写失败测试：
-  - CLI 子命令与设计第 4 节的工具一一对应，输出 JSON；
-  - `digest.record` 之后，`feeds.check` 不再返回这些视频；
-  - MCP server 注册的工具名和参数与 CLI 一致；
+- [x] 先写失败测试：
+  - CLI 子命令与设计第 4 节的工具一一对应，输出 JSON（观看循环部分已在 Task 4/5 落地）；
+  - MCP server 注册的工具名和参数与 CLI 一致（`transcript_get`、`transcript_outline`、`transcript_read`、`search`、`link`、`profile_get`、`profile_set`，外加 `open_guide`）；
   - 未安装 `mcp` 时，CLI 照常可用，启动 MCP server 给出安装提示。
-- [ ] 在 `pyproject.toml` 增加 `guide` extra 和 `video-guide` 入口；`dev` extra 加入 `mcp`，保证 mypy 和测试能覆盖 MCP 部分。
-- [ ] 测试通过后，用 `vidsnap --help` 确认现有 CLI 没有变化。提交：`feat(guide): expose guide tools via CLI and MCP`。
+- [ ] `digest.record` 之后，`feeds.check` 不再返回这些视频。这一项还没做。
+- [x] `pyproject.toml` 的可选 extra 名是 `mcp`（设计里写过 `guide`，按当前仓库的 extra 名安装）。`dev` extra 已加入 `mcp`。`video-guide` 入口本来就有。
+- [x] 测试通过后提交 MCP server。本仓库没有 `vidsnap` CLI。
 
 ## Task 7：Skill 与宿主接入
 
 **Files:** `skills/personal-video-guide/SKILL.md`、`references/{onboarding,daily-digest,watch-along,evidence}.md`、`skills/personal-video-guide/hosts/workbuddy.md`、`tests/test_skill_package.py`。
 
-- [ ] 先写失败测试：SKILL.md 有合法 frontmatter（name、description）；引用的 references 文件都存在；提到的工具名都在 service 中存在。
-- [ ] 写 SKILL.md：触发条件、模式选择（每日导览或陪看）、工具调用顺序、卡片模板和证据规则。卡片中的链接只能用 `link.at` 生成，不得自行拼接。正文保持精简，细节放进 references。
-- [ ] 写 WorkBuddy 接入说明，依据 Task 1 的实测结果：
+- [x] 先写失败测试：SKILL.md 有合法 frontmatter（name、description）；引用的 references 文件都存在；提到的工具名都在 MCP server 上存在。
+- [x] 写 SKILL.md：触发条件、模式选择（每日导览或陪看）、工具调用顺序、卡片模板和证据规则。卡片中的链接只能用 `link` 生成，不得自行拼接。正文保持精简，细节放进 references。Codex 插件清单（`.codex-plugin/plugin.json`、`.mcp.json`、`.agents/plugins/marketplace.json`，以及现行 schema 的根 `plugin.json` / `mcp.json`）和本地陪看页 `open_guide` 一并落地。
+- [x] 写 WorkBuddy 接入说明，依据 Task 1 的实测结果：
   - Skill 复制到 `~/.workbuddy/skills/personal-video-guide/`；
   - MCP 写入 `~/.workbuddy-ai/mcp.json`（`command` + `args`），重启 WorkBuddy，在 Connectors → Custom connectors 里点一次 Trust；
   - 首次对齐结束时，由宿主在对话中创建定时任务，并把任务名和时间回报给用户；
   - 说明 WorkBuddy 必须在推送时间处于运行状态，否则下次打开时补推一次；
   - 暂停和取消都在 Scheduled 页面操作。
-- [ ] 测试通过后提交：`feat(guide): add personal video guide skill`。
+- [x] 测试通过后提交：MCP server、Skill、Codex 插件和本地陪看页在同一分支。
 
 ## Task 8：真实验收
 

@@ -73,10 +73,10 @@ def transcript_outline(
     description: str = typer.Option(
         "",
         "--description",
-        help="Video description. Chapter lines such as '00:00 Intro' become the outline.",
+        help="Chapter lines such as '00:00 Intro'. Omit this to use chapters saved with the captions.",
     ),
 ) -> None:
-    """Print chapters, or 5-minute windows when the description has none."""
+    """Print chapters from metadata, or 5-minute windows when none were found."""
     _run(lambda: _service().transcript_outline(url, description))
 
 
@@ -202,6 +202,17 @@ def profile_set(
         )
 
     _run(apply)
+
+
+@app.command("mcp")
+def mcp_command() -> None:
+    """Serve the guide tools on stdin/stdout for a local host such as Codex."""
+    from .mcp_server import McpExtraMissing, serve_stdio
+
+    try:
+        serve_stdio()
+    except McpExtraMissing as exc:
+        _emit({"ok": False, "error": "mcp_missing", "message": str(exc)})
 
 
 if __name__ == "__main__":

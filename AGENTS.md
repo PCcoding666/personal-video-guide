@@ -19,8 +19,11 @@ Design: `docs/design.md`. Plan: `docs/plan.md`. Host findings: `docs/host-compat
 - `src/video_guide/transcript.py` — chapter outline or 5-minute windows, and a bounded time-window read.
 - `src/video_guide/search.py` — BM25 lexical search over cues.
 - `src/video_guide/links.py` — `link.at` playback URLs and `h:m:s` clocks.
-- `src/video_guide/service.py` — shared entry point for the CLI.
-- `src/video_guide/cli.py` — `video-guide` typer app.
+- `src/video_guide/service.py` — shared entry point for the CLI and the MCP server.
+- `src/video_guide/cli.py` — `video-guide` typer app, including `video-guide mcp`.
+- `src/video_guide/mcp_server.py` — stdio MCP server. Tool names match the CLI with underscores.
+- `src/video_guide/guide_page.py` — local watch-along page served on 127.0.0.1.
+- `skills/personal-video-guide/` — Codex skill: watch-along method, evidence rules, guide page.
 - `tests/` — offline tests; network via `httpx.MockTransport`, yt-dlp via an injected runner, clock injected.
 
 ## Network and data boundaries
@@ -29,7 +32,7 @@ Design: `docs/design.md`. Plan: `docs/plan.md`. Host findings: `docs/host-compat
 - One exception to the HTTPS GET rule: YouTube captions are fetched by invoking a `yt-dlp` executable the user installed themselves (a profile path, then `PATH`, then the unresolved interpreter directory, the sysconfig scripts directory, and `sys.prefix/bin`, before the symlink-resolved interpreter directory). The package never installs, bundles, or pins `yt-dlp`. It reads one `-J` metadata dump, then downloads one caption language: the profile caption language when that track exists, otherwise the spoken-language track inferred from the title's script (a Latin title uses `en` or `en-orig`, not the first `*-orig` auto-dub). A script mismatch allows one alternate download. The allow-listed arguments are `-J`, `--skip-download`, `--ignore-no-formats-error`, `--write-subs`, `--write-auto-subs`, `--sub-langs`, `--sub-format`, `--no-playlist`, and `-o` into a temporary directory. It adds `--cookies-from-browser <browser>` only when the profile names a browser, or `--cookies <path>` only when the profile names a Netscape cookies.txt path. When both are set, only `--cookies` is passed. It never passes flags that download media.
 - Never download media (video or audio). Never bundle anti-bot bypasses or cookies. Any cookies the user supplies locally are never read by the package — not in the repository, logs, caches, or the state directory. The profile may store a browser name or a cookies file path; caption errors and logs omit that path, and the file itself is never opened. The optional `impersonate` extra installs `curl-cffi` for a yt-dlp that shares this environment. The package does not turn impersonation on itself.
 - Never commit, publish, or embed in fixtures: credentials, cookies, `.env` files, media, real caption tracks, user state, transcript caches, or raw provider requests/responses.
-- Not in scope: accounts, SaaS, databases, queues, players, schedulers, notification senders, model calls, vector search. Changes outside scope require an explicit, separate decision.
+- Not in scope: accounts, SaaS, databases, queues, schedulers, notification senders, model calls, vector search. A local watch-along page may embed YouTube's iframe from `127.0.0.1`. The package does not bundle a player and does not download media. That page is an explicit product decision for the Codex plugin. Other scope changes still need an explicit decision.
 
 ## Tests and gates
 

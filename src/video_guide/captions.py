@@ -34,9 +34,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .fetch import Fetcher, FetchError
-from .links import LinkError, require_video_id
+from .links import LinkError, format_timestamp, require_video_id
 from .models import COOKIE_BROWSERS, CaptionKind, Profile, Sentence, Transcript
 from .state import GuideStore
+from .transcript import parse_chapters
 
 DEFAULT_YTDLP_TIMEOUT = 120.0
 SUB_FORMAT = "json3/vtt"
@@ -354,6 +355,9 @@ def fetch_youtube_captions(
         browser = None
     run = runner or default_runner
     cookies_enabled = browser is not None or cookies_file is not None
+    title = ""
+    description = ""
+    chapter_block = ""
     with tempfile.TemporaryDirectory(prefix="video-guide-captions-") as tmp:
         directory = Path(tmp)
         template = str(directory / "%(id)s.%(ext)s")
@@ -372,7 +376,7 @@ def fetch_youtube_captions(
             return _fail("ytdlp_missing", missing or "yt-dlp was not found.")
         except OSError:
             return _fail("ytdlp_failed", "yt-dlp could not be started.")
-        manual, automatic, title, description = parse_caption_catalog(
+        manual, automatic, title, description, chapter_block = parse_caption_catalog(
             f"{listed.stdout}\n{listed.stderr}"
         )
         languages = choose_subtitle_languages(
@@ -430,9 +434,21 @@ def fetch_youtube_captions(
                         cookies_enabled,
                     )
     outcome = _without_cookies_path(outcome, cookies_file)
+    outcome = _remember_video_text(
+        outcome, title, _description_for_outline(description, chapter_block)
+    )
     if outcome.transcript is not None:
         store.save_caption(outcome.transcript)
     return outcome
+
+
+def _remember_video_text(outcome: CaptionOutcome, title: str, description: str) -> CaptionOutcome:
+    if outcome.transcript is None:
+        return outcome
+    updated = outcome.transcript.model_copy(
+        update={"title": title[:1_024], "description": description[:16_000]}
+    )
+    return CaptionOutcome(transcript=updated, failure=outcome.failure, cached=outcome.cached)
 
 
 def load_podcast_transcript(
@@ -654,12 +670,14 @@ def parse_subtitle_listing(text: str) -> tuple[list[str], list[str]]:
     return manual, automatic
 
 
-def parse_caption_catalog(text: str) -> tuple[list[str], list[str], str, str]:
-    """Return manual codes, automatic codes, title, and description.
+def parse_caption_catalog(text: str) -> tuple[list[str], list[str], str, str, str]:
+    """Return manual codes, automatic codes, title, description, and chapter lines.
 
     Prefers a yt-dlp ``-J`` object. The top-level ``language`` field is not
     read: with cookies it follows the signed-in account. ``--list-subs`` text
     is accepted when there is no JSON object; that form has no title.
+    Chapter lines come from the ``chapters`` array and are not mixed into the
+    description used for language selection.
     """
     data = _extract_json_object(text)
     if data is not None and any(
@@ -671,9 +689,35 @@ def parse_caption_catalog(text: str) -> tuple[list[str], list[str], str, str]:
         description_value = data.get("description")
         title = title_value if isinstance(title_value, str) else ""
         description = description_value if isinstance(description_value, str) else ""
-        return manual, automatic, title, description
+        return manual, automatic, title, description, _chapters_text(data.get("chapters"))
     manual, automatic = parse_subtitle_listing(text)
-    return manual, automatic, "", ""
+    return manual, automatic, "", "", ""
+
+
+def _chapters_text(value: object) -> str:
+    if not isinstance(value, list):
+        return ""
+    lines: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        start = item.get("start_time", item.get("start"))
+        label = item.get("title")
+        if isinstance(start, bool) or not isinstance(start, (int, float)):
+            continue
+        if start < 0 or not isinstance(label, str) or not label.strip():
+            continue
+        lines.append(f"{format_timestamp(float(start))} {label.strip()}")
+    return "\n".join(lines)
+
+
+def _description_for_outline(description: str, chapters: str) -> str:
+    """Keep a description that already has chapters. Otherwise append metadata chapters."""
+    if len(parse_chapters(description)) >= 2 or not chapters.strip():
+        return description
+    if description.strip():
+        return description.rstrip() + "\n" + chapters
+    return chapters
 
 
 def choose_subtitle_languages(

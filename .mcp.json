@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "video-guide": {
+      "type": "stdio",
+      "command": "video-guide",
+      "args": ["mcp"]
+    }
+  }
+}

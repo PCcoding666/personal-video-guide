@@ -25,6 +25,7 @@ mcp = ["mcp>=1.0,<2"]
 # only when yt-dlp runs from the same Python environment as this package.
 impersonate = ["curl-cffi>=0.7"]
 dev = [
+    "mcp>=1.0,<2",
     "mypy>=1.10,<3",
     "pytest>=8,<10",
     "ruff>=0.5,<1",

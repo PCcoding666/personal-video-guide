@@ -1,0 +1,23 @@
+{
+  "name": "personal-video-guide",
+  "version": "0.1.0",
+  "description": "Guide watching a YouTube video: captions, jump links, and a local guide page. No media download.",
+  "license": "MIT",
+  "keywords": ["youtube", "captions", "watch-along", "codex"],
+  "homepage": "https://github.com/PCcoding666/personal-video-guide",
+  "repository": "https://github.com/PCcoding666/personal-video-guide",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Personal Video Guide",
+    "shortDescription": "Watch a YouTube video and jump to the parts that matter",
+    "longDescription": "Codex fetches captions locally, recommends segments for your goal and time budget, and opens a guide page with the YouTube player, transcript, and jump cards.",
+    "developerName": "PCcoding666",
+    "category": "Education & Research",
+    "capabilities": ["Interactive", "Read"],
+    "websiteURL": "https://github.com/PCcoding666/personal-video-guide",
+    "defaultPrompt": [
+      "Watch this YouTube video with me and tell me where to jump."
+    ]
+  }
+}

@@ -89,6 +89,7 @@ def _runner(
     listing: str = _DEFAULT_LISTING,
     info_title: str = "An English talk",
     info_description: str = "",
+    info_chapters: list[dict[str, object]] | None = None,
 ) -> Callable[[list[str], float], CompletedRun]:
     def runner(argv: list[str], timeout: float) -> CompletedRun:
         if seen is not None:
@@ -116,6 +117,8 @@ def _runner(
                 "subtitles": {code: [{"ext": "vtt"}] for code in manual},
                 "automatic_captions": {code: [{"ext": "json3"}] for code in automatic},
             }
+            if info_chapters:
+                payload["chapters"] = info_chapters
             return CompletedRun(returncode=0, stdout=json.dumps(payload), stderr="")
         requested: set[str] | None = None
         if "--sub-langs" in argv:
@@ -1225,3 +1228,46 @@ def test_ytdlp_next_to_the_resolved_interpreter_is_a_last_resort(
     assert isinstance(argv, list)
     assert argv[0] == str(ytdlp)
     assert outcome.transcript is not None
+
+
+def test_ytdlp_chapters_are_stored_for_the_outline(tmp_path: Path) -> None:
+    files = {f"{VIDEO_ID}.en.vtt": _vtt("00:00:01.000", "00:00:02.000", "Hello there.")}
+    runner = _runner(
+        files,
+        info_title="A talk",
+        info_description="A talk about building.",
+        info_chapters=[
+            {"start_time": 0, "title": "Intro"},
+            {"start_time": 300, "title": "The point"},
+        ],
+    )
+    store, outcome = _fetch(tmp_path, runner)
+    assert outcome.transcript is not None
+    assert outcome.transcript.title == "A talk"
+    assert "A talk about building." in outcome.transcript.description
+    assert "0:00 Intro" in outcome.transcript.description
+    assert "5:00 The point" in outcome.transcript.description
+
+    from video_guide.service import GuideService
+
+    outlined = GuideService(store).transcript_outline(URL)
+    assert outlined["title"] == "A talk"
+    assert outlined["sections"][0]["source"] == "chapters"
+    assert outlined["sections"][0]["title"] == "Intro"
+    assert outlined["sections"][1]["title"] == "The point"
+
+
+def test_description_chapters_win_over_the_metadata_array(tmp_path: Path) -> None:
+    files = {f"{VIDEO_ID}.en.vtt": _vtt("00:00:01.000", "00:00:02.000", "Hello there.")}
+    runner = _runner(
+        files,
+        info_description="0:00 Keep this\n5:00 And this\n",
+        info_chapters=[
+            {"start_time": 0, "title": "Other"},
+            {"start_time": 90, "title": "Else"},
+        ],
+    )
+    _store, outcome = _fetch(tmp_path, runner)
+    assert outcome.transcript is not None
+    assert "Other" not in outcome.transcript.description
+    assert "0:00 Keep this" in outcome.transcript.description

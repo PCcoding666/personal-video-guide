@@ -53,10 +53,11 @@ Full design: [docs/design.md](docs/design.md). Build plan:
 ## Status
 
 The watching loop is in place and tested offline: give the CLI a YouTube URL,
-it fetches captions, searches them, and returns a playback link. The stdio MCP
-server and the Skill are still to come. See [docs/plan.md](docs/plan.md) for the
-task list and [docs/host-compatibility.md](docs/host-compatibility.md) for what
-has been verified against a real host.
+it fetches captions, searches them, and returns a playback link. The same
+tools are available as a local stdio MCP server and a Codex plugin. See
+[Use with Codex](#use-with-codex). The daily digest (`digest.record`,
+`sources.json`) is still open. See [docs/plan.md](docs/plan.md) and
+[docs/host-compatibility.md](docs/host-compatibility.md).
 
 | Area | State |
 | --- | --- |
@@ -64,10 +65,11 @@ has been verified against a real host.
 | `sources.json` persistence | not built yet. `GuideStore` does not write a source list |
 | Channel link → feed; `@handle` resolution; RSS discovery with 48 h overlap and per-source isolation | done. `@handle` resolution still takes the first `channelId` on the page |
 | Caption fetch and cache (manual, then automatic with `en-orig` preferred, then a podcast transcript URL) | done. YouTube goes through a yt-dlp you install; cookies stay off unless the profile names a browser |
-| Transcript outline, read, lexical search, `link.at` | done |
-| CLI (`video-guide`) | done for `transcript get` / `read` / `outline`, `search`, `link`, and `profile` |
-| stdio MCP server | planned |
-| `SKILL.md` and host install notes | planned |
+| Transcript outline, read, lexical search, `link.at` | done. Outline uses chapters stored from yt-dlp metadata when you omit `--description` |
+| CLI (`video-guide`) | done for `transcript get` / `read` / `outline`, `search`, `link`, `profile`, and `mcp` |
+| stdio MCP server | done. Install the `mcp` extra. Codex launches it locally |
+| Skill and Codex plugin | done. Daily digest recording is still not wired |
+| Local guide page | done. `open_guide` serves it on 127.0.0.1 and embeds YouTube's player |
 
 ## Watching loop
 
@@ -151,22 +153,72 @@ does not configure a PO token provider.
 YouTube channel feeds that answer 404 or 5xx are retried up to three times,
 with a short backoff, before that source is reported as failed.
 
-`transcript outline` prints chapters parsed from description lines such as
-`00:00 Intro` when a description is passed with `--description`. Otherwise it
-slices the captions into 5-minute windows. `transcript read START END` prints
-the cues in that range, up to 8,000 characters.
+`transcript outline` prints chapters. Pass `--description` when you have
+chapter lines such as `00:00 Intro`. If you omit it, the command uses the
+description and the `chapters` list saved from the yt-dlp metadata dump at
+fetch time. With neither, it slices the captions into 5-minute windows.
+`transcript read START END` prints the cues in that range, up to 8,000
+characters.
 
 Podcast RSS items keep a Podcasting 2.0 `podcast:transcript` URL when the feed
 publishes one. Loading that file is `load_podcast_transcript` in
 `video_guide.captions`, through the same allow-listed HTTPS GET as other
 feeds. The CLI commands above take a YouTube URL.
 
+## Use with Codex
+
+Codex starts the tools on your machine. There is no hosted server and no API key.
+
+1. Install the package and the MCP extra, and install `yt-dlp` yourself. Current yt-dlp needs a JavaScript runtime. Install [deno](https://docs.deno.com/), then `python -m pip install -U "yt-dlp[default]"` so `yt-dlp-ejs` is present. Put `yt-dlp` on `PATH`, or install it into the same environment as `video-guide` (a uv venv is fine).
+
+```bash
+python -m pip install 'personal-video-guide[mcp]'
+video-guide mcp
+```
+
+`video-guide mcp` speaks MCP on stdin and stdout. If the extra is missing, the command prints `mcp_missing` and the install line above, and the other subcommands still work.
+
+2. Export a Netscape `cookies.txt` from a browser that is signed in to YouTube. Point the profile at that file. The package does not open it.
+
+```bash
+video-guide profile set --cookies /path/to/cookies.txt
+video-guide profile set --caption-language en
+```
+
+Use `--caption-language` when you want a specific track. A Latin-script title otherwise prefers manual `en` or `en-orig`. Cookies mattered more than a PO token on the 2026-11-05 check. This package does not configure a PO token provider.
+
+3. Go slowly. A subtitle HTTP 429 is retried twice (after 5 seconds, then 15) and then returned as `rate_limited`. One watch-along is one metadata read plus one caption download. Do not fan out across many videos in parallel.
+
+4. Add the plugin marketplace from a checkout of this repo, then install **Personal Video Guide**:
+
+```bash
+codex plugin marketplace add PCcoding666/personal-video-guide
+```
+
+The repo root is the plugin. `.codex-plugin/plugin.json` points at `./skills/` and `./.mcp.json`. `.mcp.json` runs `video-guide mcp` over stdio. `plugin.json` and `mcp.json` are the same package in the current Agent Plugins schema. The marketplace entry is `.agents/plugins/marketplace.json` with `source.path` `./`.
+
+If marketplace install is unavailable, add the server by hand in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.video-guide]
+command = "video-guide"
+args = ["mcp"]
+```
+
+5. Start a watch-along in Codex: paste a YouTube URL and say what you want from it and how much time you have. Codex should outline the video, pick a few segments, and open a local page. The page is served on `127.0.0.1` because a YouTube embed does not run from `file://`. Left side: the player, the original link, and segment cards (click to seek, **Play all** for the sequence). Right side: Guide, Transcript, and Q&A / notes. When a segment ends, the page says `next suggested: jump to mm:ss` and offers Jump or Skip. Useful / Not useful is written to `feedback.jsonl` in the state directory and also kept in the browser's `localStorage`. Saved quotes are notes in `localStorage` only.
+
+Ask Codex for a link only after it has called the link tool. If captions fail, there is no quote and no timestamp to invent.
+
+![Guide page served on localhost, with YouTube's player and sample segment cards](docs/guide-page.png)
+
+The picture is the local page. The player is YouTube's own embed, loaded over HTTP from `127.0.0.1`. The cards are sample captions, not that video's transcript.
+
 ## Known gaps
 
 - `sources.json` is not written. A source list does not survive a restart.
 - Feed responses larger than 5 MB are refused (`DEFAULT_MAX_BYTES` in `fetch.py`), which rejects some large podcast feeds.
 - `@handle` resolution uses the first `channelId` on the channel page, so a page that mentions another channel first can resolve to the wrong feed.
-- The stdio MCP server, the Skill, and a manual check with a signed-in browser's cookies are still open. ASR is out of scope.
+- `digest.record` is not wired, so a daily digest cannot yet mark videos as already recommended. ASR is out of scope.
 
 ## Development
 
@@ -179,15 +231,18 @@ Python 3.10+. No network, no model calls, no real media in tests.
 
 ## Boundaries
 
-Deliberately out of scope: accounts, SaaS, a player, media (video/audio)
-downloads, anti-bot bypasses, bundled cookies, vector search, schedulers or
-notification senders inside the toolkit. Scheduling and delivery belong to the
-host. Network access is an allow-list of HTTPS GET requests (feed and caption
-endpoints, plus a one-time channel-page fetch to resolve a handle). YouTube
-captions are the one exception: they are fetched by running a `yt-dlp` you
-installed yourself, with subtitle-only arguments and never a media download.
-Browser cookies are off by default; if you turn them on in your profile, `yt-dlp`
-reads them from your own browser, and the package never stores or logs them.
+Deliberately out of scope: accounts, SaaS, media (video/audio) downloads,
+anti-bot bypasses, bundled cookies, vector search, schedulers or notification
+senders inside the toolkit. Scheduling and delivery belong to the host. The
+watch-along page embeds YouTube's own iframe from a local `127.0.0.1` server.
+It is not a bundled player and it does not download the video. Network access
+is an allow-list of HTTPS GET requests (feed and caption endpoints, plus a
+one-time channel-page fetch to resolve a handle). YouTube captions are the
+one exception: they are fetched by running a `yt-dlp` you installed yourself,
+with subtitle-only arguments and never a media download. Browser cookies are
+off by default; if you turn them on in your profile, `yt-dlp` reads them from
+your own browser or from a Netscape `cookies.txt` path, and the package never
+stores or logs them.
 
 Originally prototyped inside [VidSnap](https://github.com/PCcoding666/Vidsnap)
 on the `feat/personal-video-guide` branch and split out on 2026-11-01.

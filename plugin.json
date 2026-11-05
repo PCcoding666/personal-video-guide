@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "personal-video-guide",
+  "version": "0.1.0",
+  "description": "Guide watching a YouTube video: captions, jump links, and a local guide page. No media download.",
+  "homepage": "https://github.com/PCcoding666/personal-video-guide",
+  "repository": "https://github.com/PCcoding666/personal-video-guide",
+  "license": "MIT",
+  "keywords": ["youtube", "captions", "watch-along", "codex"]
+}
