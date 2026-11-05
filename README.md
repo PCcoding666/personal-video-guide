@@ -72,7 +72,11 @@ has been verified against a real host.
 ## Watching loop
 
 Install the package, and install `yt-dlp` yourself. This package does not
-install, bundle, or pin it.
+install, bundle, or pin it. Current yt-dlp needs a JavaScript runtime to solve
+YouTube's player script; install [deno](https://docs.deno.com/) and
+`python -m pip install -U "yt-dlp[default]"` (that extra pulls `yt-dlp-ejs`).
+If `yt-dlp` is installed in the same virtualenv as this package, it is found
+next to the Python interpreter even when it is not on `PATH`.
 
 ```bash
 python -m pip install -e .
@@ -110,14 +114,33 @@ Allowed browser names are `chrome`, `firefox`, `safari`, `edge`, and `brave`.
 When both a browser and a cookies file are set, the file is what yt-dlp
 receives. `profile show` prints the path you saved; caption commands do not.
 
+Caption fetch lists the available tracks, then downloads at most two: the
+original language (manual if that track exists, otherwise the `*-orig`
+automatic track) and, if you set one, a single preferred language such as
+`zh-Hans`. It does not request every auto-translated language.
+
+```bash
+video-guide profile set --caption-language zh-Hans
+video-guide profile set --clear-caption-language
+```
+
 A missing yt-dlp returns `ytdlp_missing`. The YouTube sign-in wall returns
-`bot_check`. HTTP 429 on the subtitle download returns `rate_limited`. With
-cookies still off, either error includes the hint `no_cookies`. Both messages
-also mention `curl_cffi`: yt-dlp uses it to impersonate a browser, and warns
-when it is missing. Install it beside yt-dlp, or, when yt-dlp shares this
-environment, `python -m pip install 'personal-video-guide[impersonate]'`.
-A video with no caption track returns `no_captions`. The tool does not invent
-a quote or a timestamp when that happens.
+`bot_check`. HTTP 429 on a subtitle download is retried twice (after 5s, then
+15s) and then returned as `rate_limited`. With cookies still off, either error
+includes the hint `no_cookies`. Both messages also mention `curl_cffi`: yt-dlp
+uses it to impersonate a browser, and warns when it is missing. Install it
+beside yt-dlp, or, when yt-dlp shares this environment,
+`python -m pip install 'personal-video-guide[impersonate]'`.
+`--cookies-from-browser` can fail on macOS when the process cannot read the
+browser cookie database (often missing Full Disk Access). That is
+`cookies_unreadable`, with a hint to export a Netscape `cookies.txt` instead.
+The error text does not include the database path. A video with no caption
+track returns `no_captions`. The tool does not invent a quote or a timestamp
+when that happens.
+
+On a datacenter or proxy IP, a cookies file mattered more than a PO token
+provider in the 2026-11-05 check (see the pull request notes). This package
+does not configure a PO token provider.
 
 YouTube channel feeds that answer 404 or 5xx are retried up to three times,
 with a short backoff, before that source is reported as failed.

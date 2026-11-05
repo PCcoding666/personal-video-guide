@@ -149,6 +149,16 @@ def profile_set(
         "--clear-cookies-file",
         help="Forget the cookies file path.",
     ),
+    caption_language: str | None = typer.Option(
+        None,
+        "--caption-language",
+        help="Extra caption language, e.g. en or zh-Hans. At most one extra track is downloaded.",
+    ),
+    clear_caption_language: bool = typer.Option(
+        False,
+        "--clear-caption-language",
+        help="Download only the original-language captions.",
+    ),
 ) -> None:
     """Update caption settings. Cookie contents are never read or stored."""
     if clear_cookies and cookies_from_browser is not None:
@@ -169,6 +179,15 @@ def profile_set(
             }
         )
         return
+    if clear_caption_language and caption_language is not None:
+        _emit(
+            {
+                "ok": False,
+                "error": "invalid_profile",
+                "message": "Pass either --caption-language or --clear-caption-language.",
+            }
+        )
+        return
 
     def apply() -> Mapping[str, Any]:
         return _service().update_profile(
@@ -176,6 +195,8 @@ def profile_set(
             set_cookies=clear_cookies or cookies_from_browser is not None,
             cookies_file=None if clear_cookies_file else cookies,
             set_cookies_file=clear_cookies_file or cookies is not None,
+            caption_language=None if clear_caption_language else caption_language,
+            set_caption_language=clear_caption_language or caption_language is not None,
             ytdlp_path=ytdlp_path,
             set_ytdlp_path=ytdlp_path is not None,
         )

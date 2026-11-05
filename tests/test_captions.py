@@ -12,15 +12,18 @@ from pydantic import ValidationError
 
 from video_guide.captions import (
     SUB_FORMAT,
-    SUB_LANGS,
+    SUBTITLE_ATTEMPTS,
+    SUBTITLE_BACKOFF_SECONDS,
     CaptionOutcome,
     CompletedRun,
     RunnerTimeout,
     acquire_captions,
+    choose_subtitle_languages,
     fetch_youtube_captions,
     load_podcast_transcript,
     parse_json3,
     parse_srt,
+    parse_subtitle_listing,
     parse_vtt,
 )
 from video_guide.fetch import Fetcher
@@ -42,6 +45,8 @@ ALLOWED_FLAGS = {
     "-o",
     "--cookies-from-browser",
     "--cookies",
+    "--list-subs",
+    "--ignore-no-formats-error",
 }
 FORBIDDEN_FLAGS = (
     "--extract-audio",
@@ -67,6 +72,12 @@ def _which_at(path: str) -> Callable[[str], str]:
     return which
 
 
+_DEFAULT_LISTING = """[info] Available subtitles for abcdefghijk:
+Language Formats
+en       vtt, json3
+"""
+
+
 def _runner(
     files: dict[str, str],
     *,
@@ -75,9 +86,15 @@ def _runner(
     returncode: int = 0,
     exc: BaseException | None = None,
     seen: dict[str, object] | None = None,
+    listing: str = _DEFAULT_LISTING,
 ) -> Callable[[list[str], float], CompletedRun]:
     def runner(argv: list[str], timeout: float) -> CompletedRun:
         if seen is not None:
+            argvs = seen.get("argvs")
+            if not isinstance(argvs, list):
+                argvs = []
+                seen["argvs"] = argvs
+            argvs.append(list(argv))
             seen["argv"] = list(argv)
             seen["timeout"] = timeout
             seen["calls"] = int(seen.get("calls", 0)) + 1
@@ -86,6 +103,10 @@ def _runner(
             seen["dir"] = directory
         if exc is not None:
             raise exc
+        if "--list-subs" in argv:
+            if returncode != 0:
+                return CompletedRun(returncode=returncode, stdout="", stderr=stderr)
+            return CompletedRun(returncode=0, stdout=listing, stderr="")
         written: list[Path] = []
         for name, content in files.items():
             path = directory / name
@@ -117,6 +138,7 @@ def _fetch(
     which: Callable[[str], str | None] | None = None,
     timeout: float = 30.0,
     video: str = URL,
+    sleeper: Callable[[float], None] | None = None,
 ) -> tuple[GuideStore, CaptionOutcome]:
     store = GuideStore(tmp_path)
     if profile is not None:
@@ -128,6 +150,7 @@ def _fetch(
         runner=runner,
         which=which if which is not None else _which_at("/usr/bin/yt-dlp"),
         timeout=timeout,
+        sleeper=sleeper if sleeper is not None else (lambda _delay: None),
     )
     return store, outcome
 
@@ -256,7 +279,18 @@ def test_auto_prefers_en_orig_over_translated_en(tmp_path: Path) -> None:
         f"{VIDEO_ID}.en-orig.vtt": _vtt("00:00:10.000", "00:00:12.000", "original auto line"),
     }
     names = [f"{VIDEO_ID}.en.vtt", f"{VIDEO_ID}.en-orig.vtt"]
-    _store, outcome = _fetch(tmp_path, _runner(files, stdout=_auto(names)))
+    listing = """[info] Available automatic captions for abcdefghijk:
+Language Formats
+en-orig  vtt, json3
+en       vtt, json3
+"""
+    seen: dict[str, object] = {}
+    _store, outcome = _fetch(
+        tmp_path, _runner(files, stdout=_auto(names), listing=listing, seen=seen)
+    )
+    argv = seen["argv"]
+    assert isinstance(argv, list)
+    assert argv[argv.index("--sub-langs") + 1] == "en-orig"
     assert outcome.transcript is not None
     assert outcome.transcript.kind is CaptionKind.AUTO
     assert outcome.transcript.language == "en-orig"
@@ -277,7 +311,11 @@ def test_json3_is_preferred_over_vtt_for_the_same_track(tmp_path: Path) -> None:
         f"{VIDEO_ID}.mp4": "not a caption and not read",
     }
     names = [f"{VIDEO_ID}.en-orig.vtt", f"{VIDEO_ID}.en-orig.json3"]
-    _store, outcome = _fetch(tmp_path, _runner(files, stdout=_auto(names)))
+    listing = """[info] Available automatic captions for abcdefghijk:
+Language Formats
+en-orig  vtt, json3
+"""
+    _store, outcome = _fetch(tmp_path, _runner(files, stdout=_auto(names), listing=listing))
     assert outcome.transcript is not None
     assert outcome.transcript.sentences[0].text == "from json3"
     assert outcome.transcript.sentences[0].start == 1.25
@@ -286,7 +324,13 @@ def test_json3_is_preferred_over_vtt_for_the_same_track(tmp_path: Path) -> None:
 
 def test_orig_suffix_is_automatic_when_stdout_is_silent(tmp_path: Path) -> None:
     files = {f"{VIDEO_ID}.ja-orig.vtt": _vtt("00:00:01.000", "00:00:02.000", "元の音声")}
-    _store, outcome = _fetch(tmp_path, _runner(files, stdout=lambda _directory: ""))
+    listing = """[info] Available automatic captions for abcdefghijk:
+Language Formats
+ja-orig  vtt
+"""
+    _store, outcome = _fetch(
+        tmp_path, _runner(files, stdout=lambda _directory: "", listing=listing)
+    )
     assert outcome.transcript is not None
     assert outcome.transcript.kind is CaptionKind.AUTO
     assert outcome.transcript.language == "ja-orig"
@@ -322,9 +366,17 @@ def test_argv_is_subtitle_only_and_url_is_canonical(tmp_path: Path) -> None:
     assert set(flags) <= ALLOWED_FLAGS
     assert "--cookies-from-browser" not in argv
     assert "--cookies" not in argv
+    assert "--list-subs" not in argv
+    assert "--ignore-no-formats-error" in argv
     assert argv[argv.index("--sub-format") + 1] == SUB_FORMAT
-    assert argv[argv.index("--sub-langs") + 1] == SUB_LANGS
+    assert argv[argv.index("--sub-langs") + 1] == "en"
+    assert "all" not in argv
     assert argv[-1] == URL
+    argvs = seen["argvs"]
+    assert isinstance(argvs, list)
+    assert "--list-subs" in argvs[0]
+    assert "--write-subs" not in argvs[0]
+    assert "--ignore-no-formats-error" in argvs[0]
     assert seen["timeout"] == 7
     for arg in argv:
         if "download" in arg:
@@ -562,7 +614,7 @@ def test_cache_hit_skips_the_runner_and_stores_kind(tmp_path: Path) -> None:
     second = fetch_youtube_captions(URL, store=store, runner=runner, which=which)
     assert second.cached is True
     assert second.transcript == first.transcript
-    assert seen["calls"] == 1
+    assert seen["calls"] == 2
     assert which_calls["n"] == 1
 
 
@@ -582,7 +634,7 @@ def test_corrupt_cache_is_refetched(tmp_path: Path) -> None:
     assert outcome.cached is False
     assert outcome.transcript is not None
     assert outcome.transcript.sentences[0].text == "refetched"
-    assert seen["calls"] == 1
+    assert seen["calls"] == 2
 
 
 def test_default_runner_reads_a_local_executable(tmp_path: Path) -> None:
@@ -599,9 +651,17 @@ forbidden = {
 if any(arg in forbidden for arg in args):
     sys.stderr.write("forbidden flag\\n")
     raise SystemExit(2)
-if "--skip-download" not in args or "--cookies-from-browser" in args:
+if "--skip-download" not in args or "--ignore-no-formats-error" not in args:
     sys.stderr.write("unexpected argv\\n")
     raise SystemExit(2)
+if "--cookies-from-browser" in args:
+    sys.stderr.write("unexpected argv\\n")
+    raise SystemExit(2)
+if "--list-subs" in args:
+    print("[info] Available subtitles for abcdefghijk:")
+    print("Language Formats")
+    print("en       vtt, json3")
+    raise SystemExit(0)
 out = args[args.index("-o") + 1]
 directory = pathlib.Path(out).parent
 target = directory / "abcdefghijk.en.vtt"
@@ -754,7 +814,172 @@ def test_acquire_does_not_bypass_a_bot_check(tmp_path: Path) -> None:
         fetcher=Fetcher(transport=httpx.MockTransport(explode)),
         runner=_runner({}, stderr="Sign in to confirm you're not a bot", returncode=1),
         which=_which_at("/usr/bin/yt-dlp"),
+        sleeper=lambda _delay: None,
     )
     assert outcome.failure is not None
     assert outcome.failure.code == "bot_check"
     assert outcome.failure.hint == "no_cookies"
+
+
+def test_choose_subtitle_languages_stays_at_one_or_two_tracks() -> None:
+    assert choose_subtitle_languages(["en"], ["en-orig", "en", "zh-Hans"]) == ["en"]
+    assert choose_subtitle_languages([], ["en-orig", "en", "zh-Hans"]) == ["en-orig"]
+    assert choose_subtitle_languages([], ["ja-orig", "en"], ("en",)) == ["ja-orig", "en"]
+    assert choose_subtitle_languages(["en"], ["en-orig"], ("en",)) == ["en"]
+    assert choose_subtitle_languages(["en"], ["en-orig", "zh-Hans", "zh-Hant"], ("zh",)) == [
+        "en",
+        "zh-Hans",
+    ]
+    assert choose_subtitle_languages(["fr", "en"], [], ("en",)) == ["en"]
+    assert choose_subtitle_languages([], [], ("en",)) == []
+
+
+def test_parse_subtitle_listing_splits_manual_and_automatic() -> None:
+    text = """[info] Available subtitles for abcdefghijk:
+Language Name Formats
+en       English vtt, json3
+zh-Hans  Chinese vtt, json3
+
+[info] Available automatic captions for abcdefghijk:
+Language Name Formats
+en-orig  English original vtt, json3
+en       English vtt, json3
+live_chat live chat json3
+"""
+    manual, automatic = parse_subtitle_listing(text)
+    assert manual == ["en", "zh-Hans"]
+    assert automatic == ["en-orig", "en"]
+
+
+def test_preferred_language_is_the_only_extra_download(tmp_path: Path) -> None:
+    listing = """[info] Available subtitles for abcdefghijk:
+Language Formats
+en       vtt, json3
+
+[info] Available automatic captions for abcdefghijk:
+Language Formats
+en-orig  vtt, json3
+zh-Hans  vtt, json3
+zh-Hant  vtt, json3
+"""
+    files = {
+        f"{VIDEO_ID}.en.vtt": _vtt("00:00:01.000", "00:00:02.000", "english"),
+        f"{VIDEO_ID}.zh-Hans.vtt": _vtt("00:00:01.000", "00:00:02.000", "中文"),
+    }
+    seen: dict[str, object] = {}
+    profile = Profile(preferred_caption_languages=("zh", "en"))
+    _store, outcome = _fetch(
+        tmp_path,
+        _runner(files, listing=listing, seen=seen),
+        profile=profile,
+    )
+    argv = seen["argv"]
+    assert isinstance(argv, list)
+    assert argv[argv.index("--sub-langs") + 1] == "en,zh-Hans"
+    assert outcome.transcript is not None
+    assert outcome.transcript.language == "en"
+
+
+def test_subtitle_429_retries_then_succeeds(tmp_path: Path) -> None:
+    downloads = {"n": 0}
+    sleeps: list[float] = []
+
+    def runner(argv: list[str], timeout: float) -> CompletedRun:
+        if "--list-subs" in argv:
+            return CompletedRun(0, _DEFAULT_LISTING, "")
+        downloads["n"] += 1
+        if downloads["n"] < SUBTITLE_ATTEMPTS:
+            return CompletedRun(1, "", "ERROR: HTTP Error 429: Too Many Requests")
+        directory = Path(argv[argv.index("-o") + 1]).parent
+        path = directory / f"{VIDEO_ID}.en.vtt"
+        path.write_text(_vtt("00:00:01.000", "00:00:02.000", "after backoff"), encoding="utf-8")
+        return CompletedRun(0, f"Writing video subtitles to: {path}\n", "")
+
+    _store, outcome = _fetch(tmp_path, runner, sleeper=sleeps.append)
+    assert outcome.transcript is not None
+    assert outcome.transcript.sentences[0].text == "after backoff"
+    assert downloads["n"] == SUBTITLE_ATTEMPTS
+    assert sleeps == list(SUBTITLE_BACKOFF_SECONDS)
+
+
+def test_subtitle_429_stays_rate_limited_after_the_budget(tmp_path: Path) -> None:
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    def runner(argv: list[str], timeout: float) -> CompletedRun:
+        calls["n"] += 1
+        return CompletedRun(1, "", "ERROR: HTTP Error 429: Too Many Requests")
+
+    _store, outcome = _fetch(tmp_path, runner, sleeper=sleeps.append)
+    assert outcome.failure is not None
+    assert outcome.failure.code == "rate_limited"
+    assert calls["n"] == SUBTITLE_ATTEMPTS
+    assert sleeps == list(SUBTITLE_BACKOFF_SECONDS)
+    assert "Too Many Requests" not in outcome.failure.message
+
+
+def test_usable_caption_is_kept_when_stderr_also_says_429(tmp_path: Path) -> None:
+    sleeps: list[float] = []
+
+    def runner(argv: list[str], timeout: float) -> CompletedRun:
+        if "--list-subs" in argv:
+            return CompletedRun(0, _DEFAULT_LISTING, "")
+        directory = Path(argv[argv.index("-o") + 1]).parent
+        path = directory / f"{VIDEO_ID}.en.vtt"
+        path.write_text(_vtt("00:00:01.000", "00:00:02.000", "kept"), encoding="utf-8")
+        return CompletedRun(
+            1, f"Writing video subtitles to: {path}\n", "HTTP Error 429: Too Many Requests"
+        )
+
+    _store, outcome = _fetch(tmp_path, runner, sleeper=sleeps.append)
+    assert outcome.transcript is not None
+    assert outcome.transcript.sentences[0].text == "kept"
+    assert sleeps == []
+
+
+def test_browser_cookie_database_errors_are_cookies_unreadable(tmp_path: Path) -> None:
+    secret_path = "/Users/secret/Library/Application Support/Google/Chrome/Default/Cookies"
+    stderr = (
+        "ERROR: Could not find chrome cookies database\n"
+        f"ERROR: [Errno 13] Permission denied: '{secret_path}'\n"
+        "SID=SUPER_SECRET_COOKIE\n"
+    )
+    _store, outcome = _fetch(tmp_path, _runner({}, stderr=stderr, returncode=1))
+    assert outcome.failure is not None
+    assert outcome.failure.code == "cookies_unreadable"
+    assert outcome.failure.hint == "cookies_txt"
+    assert "cookies.txt" in outcome.failure.message
+    assert secret_path not in outcome.failure.message
+    assert "SUPER_SECRET_COOKIE" not in outcome.failure.message
+    assert "Permission denied" not in outcome.failure.message
+
+
+def test_unrelated_permission_error_is_not_cookies_unreadable(tmp_path: Path) -> None:
+    _store, outcome = _fetch(
+        tmp_path,
+        _runner({}, stderr="ERROR: [Errno 13] Permission denied: '/tmp/output'", returncode=1),
+    )
+    assert outcome.failure is not None
+    assert outcome.failure.code == "ytdlp_failed"
+
+
+def test_ytdlp_beside_the_interpreter_is_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bindir = tmp_path / "venv" / "bin"
+    bindir.mkdir(parents=True)
+    ytdlp = bindir / "yt-dlp"
+    ytdlp.write_text("", encoding="utf-8")
+    monkeypatch.setattr("video_guide.captions._interpreter_bin_dir", lambda: bindir)
+    seen: dict[str, object] = {}
+    files = {f"{VIDEO_ID}.en.vtt": _vtt("00:00:01.000", "00:00:02.000", "from venv")}
+
+    def which(name: str) -> None:
+        assert name == "yt-dlp"
+
+    _store, outcome = _fetch(tmp_path / "state", _runner(files, seen=seen), which=which)
+    argv = seen["argv"]
+    assert isinstance(argv, list)
+    assert argv[0] == str(ytdlp)
+    assert outcome.transcript is not None
+    assert outcome.transcript.sentences[0].text == "from venv"

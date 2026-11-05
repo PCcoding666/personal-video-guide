@@ -7,10 +7,12 @@ removed before this function returns. ``--cookies-from-browser`` is added only
 when the profile names a browser. Cookie contents are never read, stored, or
 logged, and yt-dlp's own stdout/stderr never leave this module.
 
-Track choice, best first: manual subtitles, then automatic captions (an
-``*-orig`` track ahead of a machine translation), then a Podcasting 2.0
-transcript URL when the caller has one. Caption text is returned as data,
-including text that looks like an instruction.
+Track choice, best first: the original-language manual captions, otherwise the
+``*-orig`` automatic track, plus at most one preferred language from the
+profile. Available languages come from ``--list-subs`` (no timedtext download);
+only those codes are then requested. A Podcasting 2.0 transcript URL is next
+when the caller has one. Caption text is returned as data, including text that
+looks like an instruction.
 """
 
 from __future__ import annotations
@@ -20,8 +22,10 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,8 +35,14 @@ from .models import COOKIE_BROWSERS, CaptionKind, Profile, Sentence, Transcript
 from .state import GuideStore
 
 DEFAULT_YTDLP_TIMEOUT = 120.0
-SUB_LANGS = "all,-live_chat"
 SUB_FORMAT = "json3/vtt"
+# One metadata listing, then at most two timedtext downloads. A 429 is retried
+# twice (5s, then 15s) before the structured rate_limited error is returned.
+SUBTITLE_ATTEMPTS = 3
+SUBTITLE_BACKOFF_SECONDS = (5.0, 15.0)
+
+Sleeper = Callable[[float], None]
+_LANG_CODE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]+)*$")
 
 _STAMP = r"(?:\d{1,2}:)?\d{1,2}:\d{2}[.,]\d{1,3}"
 _ARROW = re.compile(rf"({_STAMP})\s*-->\s*({_STAMP})")
@@ -45,6 +55,13 @@ _IMPERSONATE_NOTE = (
     " yt-dlp can impersonate a browser when curl_cffi is installed in the same "
     "environment as yt-dlp. Install curl-cffi beside yt-dlp, or "
     "pip install 'personal-video-guide[impersonate]' when they share one environment."
+)
+_COOKIE_MARKERS = (
+    "cookies database",
+    "could not find chrome cookies",
+    "could not find firefox cookies",
+    "could not copy chrome cookie",
+    "failed to load cookies",
 )
 _NO_CAPTION_MARKERS = (
     "no subtitles",
@@ -296,6 +313,7 @@ def fetch_youtube_captions(
     runner: Runner | None = None,
     which: Which | None = None,
     timeout: float = DEFAULT_YTDLP_TIMEOUT,
+    sleeper: Sleeper = time.sleep,
 ) -> CaptionOutcome:
     """Fetch YouTube captions for ``video`` via the user's yt-dlp, or read the cache.
 
@@ -331,23 +349,48 @@ def fetch_youtube_captions(
     if cookies_file is not None:
         browser = None
     run = runner or default_runner
+    cookies_enabled = browser is not None or cookies_file is not None
     with tempfile.TemporaryDirectory(prefix="video-guide-captions-") as tmp:
-        template = str(Path(tmp) / "%(id)s.%(ext)s")
-        argv = _build_argv(executable, video_id, template, browser, cookies_file)
+        directory = Path(tmp)
+        template = str(directory / "%(id)s.%(ext)s")
         try:
-            completed = run(argv, timeout)
+            listed = _invoke_with_retry(
+                _build_list_argv(executable, video_id, template, browser, cookies_file),
+                directory,
+                video_id,
+                run,
+                timeout,
+                sleeper,
+            )
         except (RunnerTimeout, subprocess.TimeoutExpired):
             return _fail("timeout", "yt-dlp timed out before captions were written.")
         except FileNotFoundError:
             return _fail("ytdlp_missing", missing or "yt-dlp was not found.")
         except OSError:
             return _fail("ytdlp_failed", "yt-dlp could not be started.")
-        outcome = _interpret(
-            completed,
-            Path(tmp),
-            video_id,
-            cookies_enabled=browser is not None or cookies_file is not None,
-        )
+        manual, automatic = parse_subtitle_listing(f"{listed.stdout}\n{listed.stderr}")
+        languages = choose_subtitle_languages(manual, automatic, active.preferred_caption_languages)
+        if not languages:
+            outcome = _interpret(listed, directory, video_id, cookies_enabled=cookies_enabled)
+        else:
+            try:
+                completed = _invoke_with_retry(
+                    _build_download_argv(
+                        executable, video_id, template, browser, cookies_file, languages
+                    ),
+                    directory,
+                    video_id,
+                    run,
+                    timeout,
+                    sleeper,
+                )
+            except (RunnerTimeout, subprocess.TimeoutExpired):
+                return _fail("timeout", "yt-dlp timed out before captions were written.")
+            except FileNotFoundError:
+                return _fail("ytdlp_missing", missing or "yt-dlp was not found.")
+            except OSError:
+                return _fail("ytdlp_failed", "yt-dlp could not be started.")
+            outcome = _interpret(completed, directory, video_id, cookies_enabled=cookies_enabled)
     outcome = _without_cookies_path(outcome, cookies_file)
     if outcome.transcript is not None:
         store.save_caption(outcome.transcript)
@@ -395,6 +438,7 @@ def acquire_captions(
     runner: Runner | None = None,
     which: Which | None = None,
     timeout: float = DEFAULT_YTDLP_TIMEOUT,
+    sleeper: Sleeper = time.sleep,
 ) -> CaptionOutcome:
     """Resolve captions in source order: manual, automatic, then podcast transcript.
 
@@ -417,6 +461,7 @@ def acquire_captions(
             runner=runner,
             which=which,
             timeout=timeout,
+            sleeper=sleeper,
         )
         if outcome.ok:
             return outcome
@@ -454,32 +499,187 @@ def _cookies_file_arg(path: str | None) -> str | None:
     return path
 
 
-def _build_argv(
-    executable: str,
-    video_id: str,
-    template: str,
-    browser: str | None,
-    cookies_file: str | None,
+def _with_cookies(
+    argv: list[str], browser: str | None, cookies_file: str | None, video_id: str
 ) -> list[str]:
-    argv = [
-        executable,
-        "--skip-download",
-        "--write-subs",
-        "--write-auto-subs",
-        "--sub-langs",
-        SUB_LANGS,
-        "--sub-format",
-        SUB_FORMAT,
-        "--no-playlist",
-        "-o",
-        template,
-    ]
     if cookies_file is not None:
         argv.extend(["--cookies", cookies_file])
     elif browser is not None:
         argv.extend(["--cookies-from-browser", browser])
     argv.append(f"https://www.youtube.com/watch?v={video_id}")
     return argv
+
+
+def _build_list_argv(
+    executable: str,
+    video_id: str,
+    template: str,
+    browser: str | None,
+    cookies_file: str | None,
+) -> list[str]:
+    """Metadata only. ``--list-subs`` does not download timedtext tracks."""
+    argv = [
+        executable,
+        "--skip-download",
+        "--list-subs",
+        "--ignore-no-formats-error",
+        "--no-playlist",
+        "-o",
+        template,
+    ]
+    return _with_cookies(argv, browser, cookies_file, video_id)
+
+
+def _build_download_argv(
+    executable: str,
+    video_id: str,
+    template: str,
+    browser: str | None,
+    cookies_file: str | None,
+    languages: Sequence[str],
+) -> list[str]:
+    """Download the chosen language codes only. Never ``all``."""
+    argv = [
+        executable,
+        "--skip-download",
+        "--ignore-no-formats-error",
+        "--write-subs",
+        "--write-auto-subs",
+        "--sub-langs",
+        ",".join(languages),
+        "--sub-format",
+        SUB_FORMAT,
+        "--no-playlist",
+        "-o",
+        template,
+    ]
+    return _with_cookies(argv, browser, cookies_file, video_id)
+
+
+def parse_subtitle_listing(text: str) -> tuple[list[str], list[str]]:
+    """Split yt-dlp ``--list-subs`` output into manual and automatic language codes."""
+    manual: list[str] = []
+    automatic: list[str] = []
+    section: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        lowered = line.lower()
+        if "available automatic caption" in lowered:
+            section = "auto"
+            continue
+        if "available subtitle" in lowered:
+            section = "manual"
+            continue
+        if section is None or not line or lowered.startswith("language"):
+            continue
+        token = line.split()[0]
+        if not _LANG_CODE.fullmatch(token) or token.lower() == "live_chat":
+            continue
+        bucket = automatic if section == "auto" else manual
+        if token not in bucket:
+            bucket.append(token)
+    return manual, automatic
+
+
+def choose_subtitle_languages(
+    manual: Sequence[str],
+    automatic: Sequence[str],
+    preferred: Sequence[str] = (),
+) -> list[str]:
+    """Original track, plus at most one preferred language that is a different language.
+
+    Manual captions for the original language win over the ``*-orig`` automatic
+    track. Preferred codes are tried in order; the first available one that is
+    not the same language as the original is the only extra download.
+    """
+    orig_autos = sorted(code for code in automatic if code.lower().endswith("-orig"))
+    chosen: list[str] = []
+    if orig_autos:
+        base = orig_autos[0][: -len("-orig")]
+        chosen.append(_match_lang(manual, base) or orig_autos[0])
+    elif manual:
+        preferred_manual = _first_match(manual, preferred)
+        chosen.append(preferred_manual or min(manual, key=str.lower))
+    elif automatic:
+        plain = [code for code in automatic if not code.lower().endswith("-orig")]
+        chosen.append(_first_match(plain, preferred) or min(automatic, key=str.lower))
+    else:
+        return []
+    origin = chosen[0]
+    pool = list(manual) + [code for code in automatic if code not in manual]
+    for pref in preferred:
+        match = _match_lang(pool, pref)
+        if match is None or match in chosen or _same_language(match, origin):
+            continue
+        chosen.append(match)
+        break
+    return chosen[:2]
+
+
+def _match_lang(available: Sequence[str], wanted: str) -> str | None:
+    wanted_l = wanted.lower()
+    exact = [code for code in available if code.lower() == wanted_l]
+    if exact:
+        return exact[0]
+    prefixed = [
+        code
+        for code in available
+        if code.lower().startswith(wanted_l + "-") and not code.lower().endswith("-orig")
+    ]
+    if not prefixed:
+        return None
+    prefixed.sort(key=lambda code: (len(code), code.lower()))
+    return prefixed[0]
+
+
+def _first_match(available: Sequence[str], preferred: Sequence[str]) -> str | None:
+    for pref in preferred:
+        match = _match_lang(available, pref)
+        if match is not None:
+            return match
+    return None
+
+
+def _same_language(left: str, right: str) -> bool:
+    a = left.lower().removesuffix("-orig")
+    b = right.lower().removesuffix("-orig")
+    return a == b or a.startswith(b + "-") or b.startswith(a + "-")
+
+
+def _invoke_with_retry(
+    argv: list[str],
+    directory: Path,
+    video_id: str,
+    runner: Runner,
+    timeout: float,
+    sleeper: Sleeper,
+) -> CompletedRun:
+    """Run yt-dlp, keeping a usable track and retrying only a bare HTTP 429."""
+    completed: CompletedRun | None = None
+    for attempt in range(SUBTITLE_ATTEMPTS):
+        completed = runner(argv, timeout)
+        if _directory_has_transcript(directory, video_id, completed):
+            return completed
+        limited = _block_code(completed) == "rate_limited"
+        if not limited or attempt == SUBTITLE_ATTEMPTS - 1:
+            return completed
+        _clear_subtitle_files(directory)
+        sleeper(SUBTITLE_BACKOFF_SECONDS[attempt])
+    assert completed is not None
+    return completed
+
+
+def _directory_has_transcript(directory: Path, video_id: str, completed: CompletedRun) -> bool:
+    tracks = _collect_tracks(completed.stdout, completed.stderr, directory, video_id)
+    return _select_transcript(tracks, video_id) is not None
+
+
+def _clear_subtitle_files(directory: Path) -> None:
+    if not directory.is_dir():
+        return
+    for path in directory.iterdir():
+        if path.is_file() and path.suffix.lower().lstrip(".") in _EXT_RANK:
+            path.unlink(missing_ok=True)
 
 
 def _without_cookies_path(outcome: CaptionOutcome, cookies_file: str | None) -> CaptionOutcome:
@@ -498,6 +698,10 @@ def _without_cookies_path(outcome: CaptionOutcome, cookies_file: str | None) -> 
     )
 
 
+def _interpreter_bin_dir() -> Path:
+    return Path(sys.executable).resolve().parent
+
+
 def _resolve_executable(profile: Profile, which: Which) -> tuple[str | None, str | None]:
     if profile.ytdlp_path:
         if Path(profile.ytdlp_path).is_file():
@@ -510,8 +714,14 @@ def _resolve_executable(profile: Profile, which: Which) -> tuple[str | None, str
     found = which("yt-dlp")
     if found:
         return found, None
+    bindir = _interpreter_bin_dir()
+    for name in ("yt-dlp", "yt-dlp.exe"):
+        sibling = bindir / name
+        if sibling.is_file():
+            return str(sibling), None
     return None, (
-        "yt-dlp was not found on PATH. Install yt-dlp yourself and retry, "
+        "yt-dlp was not found on PATH or next to this Python interpreter. "
+        "Install yt-dlp yourself in this virtualenv, or on PATH, and retry, "
         "or set profile ytdlp_path to the executable. This package does not install it."
     )
 
@@ -528,12 +738,19 @@ def _interpret(
     if transcript is not None:
         return CaptionOutcome(transcript=transcript)
     blob = f"{completed.stdout}\n{completed.stderr}".casefold()
-    # The sign-in wall is a bot check. HTTP 429 without that phrase is its own
-    # code: live fetches from a cloud IP mostly returned 429, and the sign-in
-    # page was the exception.
-    if any(marker in blob for marker in _BOT_MARKERS):
+    block = _block_code(completed)
+    if block == "cookies_unreadable":
+        return _fail(
+            "cookies_unreadable",
+            "Could not read browser cookies. The cookie database was missing or this "
+            "process was not permitted to open it. On macOS, the terminal often needs "
+            "Full Disk Access before --cookies-from-browser works. Export a Netscape "
+            "cookies.txt and set profile cookies_file instead.",
+            hint="cookies_txt",
+        )
+    if block == "bot_check":
         return _blocked("bot_check", cookies_enabled=cookies_enabled)
-    if any(marker in blob for marker in _RATE_LIMIT_MARKERS):
+    if block == "rate_limited":
         return _blocked("rate_limited", cookies_enabled=cookies_enabled)
     if completed.returncode == 0 or any(marker in blob for marker in _NO_CAPTION_MARKERS):
         return _fail("no_captions", "No caption track was written for this video.")
@@ -645,6 +862,23 @@ def _cached(store: GuideStore, video_id: str) -> CaptionOutcome | None:
     if loaded is None:
         return None
     return CaptionOutcome(transcript=loaded, cached=True)
+
+
+def _block_code(completed: CompletedRun) -> str | None:
+    blob = f"{completed.stdout}\n{completed.stderr}".casefold()
+    if _cookies_unreadable(blob):
+        return "cookies_unreadable"
+    if any(marker in blob for marker in _BOT_MARKERS):
+        return "bot_check"
+    if any(marker in blob for marker in _RATE_LIMIT_MARKERS):
+        return "rate_limited"
+    return None
+
+
+def _cookies_unreadable(blob: str) -> bool:
+    if any(marker in blob for marker in _COOKIE_MARKERS):
+        return True
+    return "cookie" in blob and "permission denied" in blob
 
 
 def _blocked(code: str, *, cookies_enabled: bool) -> CaptionOutcome:

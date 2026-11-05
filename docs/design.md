@@ -130,10 +130,11 @@ YouTube 的风险：字幕接口和视频下载都可能被反爬拦截。2026-1
 
 YouTube 字幕的获取方式已定为方案 A（2026-11-01 用户决定）：调用用户自己安装的 `yt-dlp`，只取字幕。
 
-- 工具包不安装、不打包、不锁定 `yt-dlp` 版本。从 `PATH` 或 profile 里配置的路径查找；找不到时返回 `ytdlp_missing`，并提示用户自行安装。
-- 只用固定的参数白名单：`--skip-download`、`--write-subs`、`--write-auto-subs`、`--sub-langs`、`--sub-format json3/vtt`、`-o` 指向临时目录、`--no-playlist`；不传任何会下载音视频的参数。
+- 工具包不安装、不打包、不锁定 `yt-dlp` 版本。查找顺序是 profile 路径、`PATH`、当前 Python 解释器同目录；都找不到时返回 `ytdlp_missing`，并提示用户自行安装。
+- 只用固定的参数白名单：`--skip-download`、`--list-subs`（只列语言，不下载 timedtext）、`--ignore-no-formats-error`、`--write-subs`、`--write-auto-subs`、`--sub-langs`（只含原语言轨，再加至多一种 profile 里的偏好语言）、`--sub-format json3/vtt`、`-o` 指向临时目录、`--no-playlist`；不传任何会下载音视频的参数，也不使用 `--sub-langs all`。字幕下载遇到 HTTP 429 时退避重试两次，仍失败则返回 `rate_limited`。
+- 查找 `yt-dlp` 的顺序：profile 路径、`PATH`、当前 Python 解释器同目录（同一个 venv）。浏览器 cookie 数据库打不开时返回 `cookies_unreadable`，提示改用 Netscape `cookies.txt`，错误文本不含路径。
 - cookie 默认关闭。用户可以在 profile 里填写 `cookies_from_browser`（例如 `chrome`），此时追加 `--cookies-from-browser <browser>`；也可以填写 Netscape `cookies.txt` 的路径 `cookies_file`，此时追加 `--cookies <path>`。两者都设置时只传 `--cookies`。工具包从不打开该文件，不把路径写进字幕错误或日志，也不读取、复制或保存 cookie 内容。
-- 每次调用有超时；输出写进临时目录，解析完即删除。错误按原因归类为 `bot_check`（YouTube 要求登录的那句）、`rate_limited`（字幕下载 HTTP 429）、`no_cookies`（前两者在未配置 cookie 时的提示）、`no_captions`、`ytdlp_missing`、`timeout`。`bot_check` 和 `rate_limited` 的说明里会提到 yt-dlp 的可选依赖 `curl_cffi`（本包的 `impersonate` extra，装到与 yt-dlp 相同的环境）。不把 `yt-dlp` 的原始输出写进日志或返回值。
+- 每次调用有超时；输出写进临时目录，解析完即删除。错误按原因归类为 `bot_check`（YouTube 要求登录的那句）、`rate_limited`（字幕下载 HTTP 429）、`cookies_unreadable`（浏览器 cookie 数据库打不开）、`no_cookies`（前两者在未配置 cookie 时的提示）、`no_captions`、`ytdlp_missing`、`timeout`。`bot_check` 和 `rate_limited` 的说明里会提到 yt-dlp 的可选依赖 `curl_cffi`（本包的 `impersonate` extra，装到与 yt-dlp 相同的环境）。不把 `yt-dlp` 的原始输出写进日志或返回值。
 - 播客的 `podcast:transcript` 仍走工具包自己的白名单 HTTPS GET。
 
 其他约束：

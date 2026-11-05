@@ -41,8 +41,13 @@ forbidden = {
 }
 if any(arg in forbidden for arg in args) or "--skip-download" not in args:
     raise SystemExit(2)
-if "--cookies-from-browser" in args:
+if "--ignore-no-formats-error" not in args or "--cookies-from-browser" in args:
     raise SystemExit(2)
+if "--list-subs" in args:
+    print("[info] Available subtitles for abcdefghijk:")
+    print("Language Formats")
+    print("en       vtt, json3")
+    raise SystemExit(0)
 log = os.environ.get("GUIDE_FAKE_LOG")
 if log:
     with open(log, "a", encoding="utf-8") as handle:
@@ -153,6 +158,9 @@ def test_cli_link_does_not_fetch_captions(
 
 def test_cli_reports_missing_ytdlp(guide_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("video_guide.captions.shutil.which", lambda _name: None)
+    monkeypatch.setattr(
+        "video_guide.captions._interpreter_bin_dir", lambda: guide_home / "empty-bin"
+    )
     result = RUNNER.invoke(app, ["transcript", "get", URL])
     assert result.exit_code == 1
     body = _payload(result)
@@ -194,6 +202,17 @@ def test_cli_profile_cookies_file_round_trip(guide_home: Path, tmp_path: Path) -
     cleared = RUNNER.invoke(app, ["profile", "set", "--clear-cookies-file"])
     assert cleared.exit_code == 0
     assert _payload(cleared)["cookies_file"] is None
+
+
+def test_cli_profile_caption_language(guide_home: Path) -> None:
+    refused = RUNNER.invoke(app, ["profile", "set", "--caption-language", "--extract-audio"])
+    assert refused.exit_code == 1
+    saved = RUNNER.invoke(app, ["profile", "set", "--caption-language", "zh-Hans"])
+    assert saved.exit_code == 0
+    assert _payload(saved)["preferred_caption_languages"] == ["zh-Hans"]
+    cleared = RUNNER.invoke(app, ["profile", "set", "--clear-caption-language"])
+    assert cleared.exit_code == 0
+    assert _payload(cleared)["preferred_caption_languages"] == []
 
 
 def test_cli_rejects_a_non_http_link(guide_home: Path) -> None:

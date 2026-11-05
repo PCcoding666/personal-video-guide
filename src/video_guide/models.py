@@ -7,11 +7,14 @@ state file written by a newer build is refused rather than silently misread.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+_CAPTION_LANGUAGE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]+)*$")
 
 SCHEMA_VERSION: Literal[1] = 1
 
@@ -68,6 +71,31 @@ class Profile(GuideModel):
     # Netscape cookies.txt path. The file is never opened here; only yt-dlp
     # receives the path, and caption errors do not repeat it.
     cookies_file: str | None = None
+    # Tried in order when choosing one extra track besides the original.
+    # The fetch still downloads at most one of these.
+    preferred_caption_languages: tuple[str, ...] = ()
+
+    @field_validator("preferred_caption_languages", mode="before")
+    @classmethod
+    def _split_languages(cls, value: object) -> object:
+        if value is None or value == "":
+            return ()
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        return value
+
+    @field_validator("preferred_caption_languages")
+    @classmethod
+    def _check_languages(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(value) > 8:
+            raise ValueError("at most 8 preferred caption languages")
+        cleaned: list[str] = []
+        for item in value:
+            code = item.strip()
+            if not _CAPTION_LANGUAGE.fullmatch(code):
+                raise ValueError("preferred caption language must look like en or zh-Hans")
+            cleaned.append(code)
+        return tuple(cleaned)
 
     @field_validator("ytdlp_path", "cookies_file", mode="before")
     @classmethod
