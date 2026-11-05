@@ -147,12 +147,36 @@ def test_parse_youtube_atom() -> None:
     assert items[0].published_at == datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
 
 
+PODCAST_WITH_TRANSCRIPT = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:podcast="https://podcastindex.org/namespace/1.0">
+  <channel>
+    <item>
+      <guid>EP9</guid>
+      <title>With transcript</title>
+      <link>https://pod.example/ep9</link>
+      <pubDate>Fri, 30 Oct 2026 12:00:00 +0000</pubDate>
+      <description>Desc</description>
+      <podcast:transcript url="https://pod.example/ep9.json" type="application/json"/>
+      <podcast:transcript url="https://pod.example/ep9.vtt" type="text/vtt" language="en"/>
+    </item>
+  </channel>
+</rss>
+"""
+
+
 def test_parse_podcast_rss() -> None:
     items = parse_podcast_rss(RSS.encode("utf-8"), "src")
     assert len(items) == 1
     assert items[0].video_id == "EP1"
     assert items[0].url == "https://pod.example/ep1"
     assert items[0].published_at == datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
+    assert items[0].transcript_url is None
+
+
+def test_parse_podcast_rss_prefers_vtt_transcript() -> None:
+    items = parse_podcast_rss(PODCAST_WITH_TRANSCRIPT.encode("utf-8"), "src")
+    assert items[0].video_id == "EP9"
+    assert items[0].transcript_url == "https://pod.example/ep9.vtt"
 
 
 # --- discovery: dedup, window, isolation ---------------------------------------

@@ -79,6 +79,19 @@ def test_unknown_schema_version_is_rejected(tmp_path: Path) -> None:
         store.profile()
 
 
+def test_profile_without_caption_fields_still_loads(tmp_path: Path) -> None:
+    store = GuideStore(tmp_path)
+    store.profile_path.write_text(
+        json.dumps({"schema_version": 1, "interests": ["ai"], "max_cards": 3}),
+        encoding="utf-8",
+    )
+    profile = store.profile()
+    assert profile.interests == ("ai",)
+    assert profile.schema_version == 1
+    assert profile.cookies_from_browser is None
+    assert profile.ytdlp_path is None
+
+
 def test_feedback_only_accepts_known_kinds(tmp_path: Path) -> None:
     store = GuideStore(tmp_path)
     store.add_feedback("vid-1", FeedbackKind.INTERESTED, now=FIXED)

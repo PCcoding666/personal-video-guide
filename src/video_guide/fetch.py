@@ -1,9 +1,13 @@
 """Allow-listed, size-capped HTTPS GET for the guide.
 
-This is the only component that reaches the network. It refuses any non-HTTPS
-URL, any host outside the allow-list (YouTube's feed/caption/channel hosts plus
-the hosts of feeds the user explicitly added), and any response larger than the
-byte cap. The transport is injectable so tests stay fully offline.
+This is the only component that opens an HTTP connection itself. It refuses any
+non-HTTPS URL, any host outside the allow-list (YouTube's feed/caption/channel
+hosts plus the hosts of feeds the user explicitly added), and any response
+larger than the byte cap. The transport is injectable so tests stay fully
+offline.
+
+YouTube caption tracks are not fetched here. Those go through a user-installed
+``yt-dlp`` in ``captions.py``, subtitle flags only.
 """
 
 from __future__ import annotations
@@ -45,19 +49,21 @@ class Fetcher:
         if host not in self._allowed:
             raise FetchError(f"host not allow-listed: {host!r}")
         try:
-            with httpx.Client(
-                transport=self._transport,
-                timeout=self._timeout,
-                follow_redirects=False,
-            ) as client:
-                with client.stream("GET", url) as response:
-                    if response.status_code != 200:
-                        raise FetchError(f"unexpected status {response.status_code} for {url!r}")
-                    body = bytearray()
-                    for chunk in response.iter_bytes():
-                        body.extend(chunk)
-                        if len(body) > self._max_bytes:
-                            raise FetchError(f"response exceeds {self._max_bytes} bytes: {url!r}")
-                    return bytes(body)
+            with (
+                httpx.Client(
+                    transport=self._transport,
+                    timeout=self._timeout,
+                    follow_redirects=False,
+                ) as client,
+                client.stream("GET", url) as response,
+            ):
+                if response.status_code != 200:
+                    raise FetchError(f"unexpected status {response.status_code} for {url!r}")
+                body = bytearray()
+                for chunk in response.iter_bytes():
+                    body.extend(chunk)
+                    if len(body) > self._max_bytes:
+                        raise FetchError(f"response exceeds {self._max_bytes} bytes: {url!r}")
+                return bytes(body)
         except httpx.HTTPError as exc:
             raise FetchError(f"request failed for {url!r}: {exc}") from exc

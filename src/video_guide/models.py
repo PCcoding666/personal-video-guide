@@ -11,9 +11,13 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 SCHEMA_VERSION: Literal[1] = 1
+
+# Browser names yt-dlp accepts for --cookies-from-browser. The profile stores
+# only this name. Cookie bytes are never read or written by this package.
+COOKIE_BROWSERS: tuple[str, ...] = ("chrome", "firefox", "safari", "edge", "brave")
 
 
 class GuideModel(BaseModel):
@@ -29,6 +33,14 @@ class FeedbackKind(str, Enum):
     NOT_INTERESTED = "not_interested"
     WATCHED = "watched"
     CORRECT = "correct"
+
+
+class CaptionKind(str, Enum):
+    """Where a timed transcript came from. Citations should say which."""
+
+    MANUAL = "manual"
+    AUTO = "auto"
+    PODCAST = "podcast"
 
 
 class CurrentQuestion(GuideModel):
@@ -49,6 +61,36 @@ class Profile(GuideModel):
     max_cards: int = Field(default=3, ge=1, le=20)
     watch_budget_minutes: int = Field(default=30, ge=1, le=600)
     announce_when_empty: bool = False
+    # Both default to unset so a profile.json written before caption support
+    # still loads, and schema_version stays 1.
+    ytdlp_path: str | None = None
+    cookies_from_browser: str | None = None
+
+    @field_validator("ytdlp_path", mode="before")
+    @classmethod
+    def _blank_path(cls, value: object) -> object:
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
+
+    @field_validator("cookies_from_browser", mode="before")
+    @classmethod
+    def _normalize_browser(cls, value: object) -> object:
+        if isinstance(value, str):
+            stripped = value.strip().lower()
+            return stripped or None
+        return value
+
+    @field_validator("cookies_from_browser")
+    @classmethod
+    def _known_browser(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value not in COOKIE_BROWSERS:
+            allowed = ", ".join(COOKIE_BROWSERS)
+            raise ValueError(f"cookies_from_browser must be one of: {allowed}")
+        return value
 
 
 class SeenVideo(GuideModel):
@@ -96,3 +138,46 @@ class VideoItem(GuideModel):
     url: str = Field(min_length=1, max_length=2_048)
     published_at: datetime
     summary: str = Field(default="", max_length=8_000)
+    # Podcasting 2.0 <podcast:transcript> when the feed published one.
+    transcript_url: str | None = Field(default=None, max_length=2_048)
+
+
+class Sentence(GuideModel):
+    """One timed caption cue. Times are seconds from the start of the video."""
+
+    start: float = Field(ge=0)
+    end: float = Field(ge=0)
+    text: str = Field(min_length=1)
+
+
+class Transcript(GuideModel):
+    """A cached caption track. ``kind`` is manual, auto, or podcast."""
+
+    schema_version: Literal[1] = SCHEMA_VERSION
+    video_id: str = Field(min_length=1, max_length=256)
+    language: str = Field(default="", max_length=64)
+    kind: CaptionKind
+    duration: float = Field(ge=0)
+    sentences: tuple[Sentence, ...] = ()
+
+
+class Window(GuideModel):
+    """A chapter, or a fixed time slice when the description has no chapters."""
+
+    start: float = Field(ge=0)
+    end: float = Field(ge=0)
+    title: str = Field(min_length=1, max_length=512)
+    source: Literal["chapters", "window"]
+    preview: tuple[str, ...] = ()
+
+
+class Hit(GuideModel):
+    """A lexical search hit. ``url`` is a tool-built playback link when one exists."""
+
+    start: float = Field(ge=0)
+    end: float = Field(ge=0)
+    text: str = Field(min_length=1)
+    score: float
+    context_before: str | None = None
+    context_after: str | None = None
+    url: str | None = None

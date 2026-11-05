@@ -1,22 +1,31 @@
-"""Local, append-only state for the personal video guide.
+"""Local state for the personal video guide.
 
 State lives outside the repository under ``~/.video-guide/`` by default, or
 the path named by ``VIDSNAP_GUIDE_HOME``. Everything is plain, hand-editable
-text. The profile is written atomically (temp file, then ``os.replace``) so an
-interrupted write never corrupts the previous copy; the seen and feedback logs
-are append-only JSONL with one record per line. A clock is injected by the
-caller so tests stay deterministic.
+text. The profile and the caption cache are written atomically (temp file,
+then ``os.replace``) so an interrupted write never corrupts the previous copy;
+the seen and feedback logs are append-only JSONL with one record per line. A
+clock is injected by the caller so tests stay deterministic.
+
+Caption tracks live under ``cache/captions/`` and can be deleted at any time.
+They are data, not instructions, and they are never committed to the repository.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from .models import SCHEMA_VERSION, FeedbackEntry, FeedbackKind, Profile, SeenVideo
+from pydantic import ValidationError
+
+from .models import SCHEMA_VERSION, FeedbackEntry, FeedbackKind, Profile, SeenVideo, Transcript
+
+_SAFE_CACHE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 _ENV_HOME = "VIDSNAP_GUIDE_HOME"
 _DEFAULT_HOME = ".video-guide"
@@ -57,6 +66,14 @@ def _append_jsonl(path: Path, line: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(line + "\n")
+
+
+def _caption_cache_name(video_id: str) -> str:
+    """A cache filename that cannot escape the captions directory."""
+    if _SAFE_CACHE_ID.fullmatch(video_id):
+        return f"{video_id}.json"
+    digest = hashlib.sha256(video_id.encode("utf-8")).hexdigest()[:16]
+    return f"id-{digest}.json"
 
 
 def _check_version(raw: object, source: str) -> None:
@@ -119,3 +136,34 @@ class GuideStore:
     ) -> None:
         entry = FeedbackEntry(video_id=video_id, kind=kind, note=note, created_at=now)
         _append_jsonl(self.feedback_path, entry.model_dump_json())
+
+    def caption_cache_path(self, video_id: str) -> Path:
+        return self.home / "cache" / "captions" / _caption_cache_name(video_id)
+
+    def load_caption(self, video_id: str) -> Transcript | None:
+        """Return a cached transcript, or None when the cache is missing or unusable.
+
+        A corrupt file or an unexpected schema is a cache miss. Caption files are
+        disposable; the caller refetches instead of refusing to start.
+        """
+        path = self.caption_cache_path(video_id)
+        if not path.is_file():
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(raw, dict) or raw.get("schema_version") != SCHEMA_VERSION:
+            return None
+        if raw.get("video_id") != video_id:
+            return None
+        try:
+            return Transcript.model_validate(raw)
+        except ValidationError:
+            return None
+
+    def save_caption(self, transcript: Transcript) -> None:
+        _atomic_write_text(
+            self.caption_cache_path(transcript.video_id),
+            transcript.model_dump_json(indent=2) + "\n",
+        )

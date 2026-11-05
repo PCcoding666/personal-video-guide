@@ -23,6 +23,10 @@ OVERLAP = timedelta(hours=48)
 _ATOM = "{http://www.w3.org/2005/Atom}"
 _YT = "{http://www.youtube.com/xml/schemas/2015}"
 _MEDIA = "{http://search.yahoo.com/mrss/}"
+_PODCAST_NS = (
+    "{https://podcastindex.org/namespace/1.0}",
+    "{https://github.com/Podcastindex-org/podcast-namespace/blob/main/docs/1.0.md}",
+)
 
 
 @dataclass
@@ -85,6 +89,37 @@ def parse_youtube_atom(xml: bytes, source_id: str) -> list[VideoItem]:
     return items
 
 
+def _podcast_transcript_url(item: ET.Element) -> str | None:
+    """Pick the best Podcasting 2.0 transcript URL on one item, if any.
+
+    VTT is preferred, then SRT, then JSON. The URL is data for a later caption
+    fetch; this function does not download it.
+    """
+    ranked: list[tuple[int, str]] = []
+    nodes: list[ET.Element] = []
+    for namespace in _PODCAST_NS:
+        nodes.extend(item.findall(f"{namespace}transcript"))
+    for node in nodes:
+        url = (node.get("url") or "").strip()
+        if not url:
+            continue
+        mime = (node.get("type") or "").lower()
+        path = url.lower().split("?", 1)[0]
+        if "vtt" in mime or path.endswith(".vtt"):
+            rank = 0
+        elif "srt" in mime or path.endswith(".srt"):
+            rank = 1
+        elif "json" in mime:
+            rank = 2
+        else:
+            rank = 3
+        ranked.append((rank, url))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda pair: pair[0])
+    return ranked[0][1]
+
+
 def parse_podcast_rss(xml: bytes, source_id: str) -> list[VideoItem]:
     """Parse a podcast RSS feed into video items."""
     root = ET.fromstring(xml)
@@ -106,6 +141,7 @@ def parse_podcast_rss(xml: bytes, source_id: str) -> list[VideoItem]:
                 url=link or f"podcast:{identifier}",
                 published_at=_aware(parsedate_to_datetime(published)),
                 summary=_text(item.find("description"))[:8_000],
+                transcript_url=_podcast_transcript_url(item),
             )
         )
     return items
@@ -126,7 +162,7 @@ def check_source(
             parsed = parse_youtube_atom(raw, source.id)
         else:
             parsed = parse_podcast_rss(raw, source.id)
-    except Exception as exc:  # isolate: one source's failure must not sink others
+    except Exception as exc:  # noqa: BLE001  # one source must not sink the others
         return SourceCheck(source_id=source.id, ok=False, error=str(exc))
 
     cutoff = source.last_checked_at - overlap if source.last_checked_at is not None else None
